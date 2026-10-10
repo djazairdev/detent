@@ -65,6 +65,27 @@ function auditBackend(claims: readonly Json[], events: string[], during: (n: num
   };
 }
 
+/**
+ * PRDR-335: `backend`, with a clock that only its sessions move, each by the
+ * length `took` sets for its task, so a session's length on its ledger row is
+ * exact. Read from the wall clock, the check's 5 ms wait read 4 in CI: Node
+ * counts a timer's delay from libuv's loop time floored to the millisecond,
+ * and each `Date` reading is floored too.
+ */
+function timed(backend: SessionBackend, took: Readonly<Record<string, number>>): { readonly backend: SessionBackend; readonly now: () => Date } {
+  let at = Date.parse("2026-10-10T09:00:00.000Z");
+  return {
+    backend: {
+      ...backend,
+      run: async (spec) => {
+        at += took[String(inputsOf(spec)["task"])] ?? 0;
+        return await backend.run(spec);
+      },
+    },
+    now: () => new Date(at),
+  };
+}
+
 const releases: (() => void)[] = [];
 afterEach(() => {
   for (const release of releases.splice(0)) release();
@@ -123,9 +144,10 @@ describe("N-5⁗ AUDIT says what its checks will cost before the first one start
 
   it("records each init session's task, routed effort and length on its ledger row", async () => {
     const root = repo({ "PRD.md": PRD });
+    const { backend, now } = timed(auditBackend(claimsOf(1), []), { survey: 3_000, triage: 1_000, verify_claims: 42_000 });
     await runInit(
       root,
-      buildPipeline({ root, backend: auditBackend(claimsOf(1), []), prompts: PROMPTS, budgets: BUDGETS, ...ROUTED }).filter((h) => THROUGH_AUDIT.has(h.phase)),
+      buildPipeline({ root, backend, now, prompts: PROMPTS, budgets: BUDGETS, ...ROUTED }).filter((h) => THROUGH_AUDIT.has(h.phase)),
     );
     const rows = readFileSync(path.join(stateDir(root), "ledger.jsonl"), "utf8")
       .split("\n")
@@ -133,8 +155,11 @@ describe("N-5⁗ AUDIT says what its checks will cost before the first one start
       .map((l) => JSON.parse(l) as Json);
     const check = rows.find((r) => r["task"] === "verify_claims");
     expect(check?.["effort"]).toBe("max");
-    expect(check?.["duration_ms"]).toBeGreaterThanOrEqual(5);
-    expect(rows.map((r) => r["task"])).toEqual(["survey", "triage", "verify_claims"]);
+    expect(rows.map((r) => [r["task"], r["duration_ms"]]), "each row the length of its own session, on the pipeline's clock").toEqual([
+      ["survey", 3_000],
+      ["triage", 1_000],
+      ["verify_claims", 42_000],
+    ]);
   });
 });
 

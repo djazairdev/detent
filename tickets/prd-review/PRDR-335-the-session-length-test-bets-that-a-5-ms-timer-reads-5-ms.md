@@ -1,7 +1,7 @@
 ---
 id: PRDR-335
 title: "The test that an init session's ledger row records its length asserts at least the 5 ms its mock claim check waits, and the length it reads is two wall-clock `Date` readings. Node counts a timer's delay from libuv's loop time, floored to the millisecond, so a 5 ms timer can fire after 4.1 ms, and a span under 5 ms reads 4 on two floored `Date` readings. Since vitest 5 landed, `verify (22)` failed on it in 4 of its 6 runs on 2026-10-10, the 3.2.0 release pull request's among them. The test will give the pipeline a clock that only its sessions move, and assert each row's length exactly"
-state: OPEN
+state: DONE
 severity: major
 category: weak-test
 labels: ["prd-review", "flaky-test", "N-5⁗", "ci", "clock", "ledger"]
@@ -99,3 +99,50 @@ afterwards and never committed. The claim check row's `duration_ms`:
 | 22.23.2 | 0 | 31 | 145 | 80 | 44 |
 
 On Node 24, 4 of the 300 read 4, where HEAD's assertion fails. On Node 22, a tenth sat on its line.
+
+## What changed
+
+- `tests/init/estimate-notes.test.ts`: `timed(backend, took)` wraps a backend with a clock that
+  only its sessions move, each by the length `took` sets for its task. The length test hands that
+  clock to `buildPipeline` as `now` and asserts each row's task and `duration_ms` as pairs: the
+  survey's 3,000, the triage's 1,000 and the claim check's 42,000. The `>= 5` bound is gone, and so
+  is the test's reading of the wall clock. Nothing under `src/` changed.
+
+Run 200 times in one process (vitest's `repeats`, from a scratch edit restored afterwards and
+checked with `cmp`), the new test passed every time on Node 22.23.2 and on 24.21.0.
+
+## Mutation battery
+
+Six mutants, each applied to a snapshot copy of its file and run against HEAD's test and the new
+one, on Node 22.23.2. Each file was restored from its copy and checked with `cmp`.
+
+| Mutant | HEAD's test | The new test |
+|---|---|---|
+| M1 `session.ts` records no length | killed | killed |
+| M2 `session.ts` records a length of 0 | killed | killed |
+| M3 `session.ts` reads the wall clock, not its `now` seam | **survived** | killed |
+| M4 `session.ts` times every session from the first launch | **survived** | killed |
+| M5 `ledger.ts` writes no `duration_ms` | killed | killed |
+| M6 `ledger.ts` writes the length in seconds | killed | killed |
+
+HEAD's test could not see M3, since it gave no clock and the wall clock was the one the code read
+anyway, nor M4, since a span timed from an earlier launch is longer still and passes `>= 5`.
+
+## Gates
+
+- `npm run lint`, `typecheck`, `parity:check`, `prompts:check`, `rules:check`, `tickets:check`:
+  pass, on Node 22.23.2.
+- `tests/init/estimate-notes.test.ts`: 8 passed, on Node 22.23.2 and on 24.21.0.
+- `npm test`, once, on Node 22.23.2: 228 files, 2,539 passed and 2 skipped (2,541).
+
+## Recorded, not fixed
+
+- **What raised the rate is not known.** In the six CI runs that ran this test before vitest 5, it
+  passed on both Node versions; since, it failed in 4 of 6 on Node 22 and in none on Node 24.
+  Locally, HEAD's test body read 4 only on Node 24. Neither vitest's change nor Node's was traced,
+  and the fix does not depend on either.
+- **A session's length is two wall-clock readings in production too.** A step of the wall clock
+  during a session, such as an NTP correction, moves its row's length, and N-5⁗'s estimates read
+  medians of those lengths. A monotonic clock would not move. The seam is a `Date` clock that the
+  outage wait reads too (PRDR-189), and `src/` stays as the 3.2.0 release was walked on it. A
+  median keeps one such row from moving an estimate.
