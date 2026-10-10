@@ -2,9 +2,9 @@
 | | |
 |---|---|
 | Product | Detent: state-driven autonomous engineering, delivered as a Claude Code plugin |
-| Version | 3.1.0 |
-| Date | 2026-09-02 |
-| Status | Released (T-142) — 3.1.0 certified by the N-7 gate on `detent-n7-310`, 67/67 DONE; draft line 3.0-draft.1…draft.6 closed by the N-7 green (T-140) |
+| Version | 3.2.0 |
+| Date | 2026-10-10 |
+| Status | Released — 3.2.0 ships the amendments this document marks 3.1.1, without the N-7 gate: the maintainer waived the self-build for this release on 2026-10-10, so no N-7 run certifies it (release checklist, item 5). 3.1.0 was certified by the N-7 gate on `detent-n7-310`, 67/67 DONE (T-142); draft line 3.0-draft.1…draft.6 closed by the N-7 green (T-140) |
 | Implementation | TypeScript (public, open source) |
 | Supersedes | PRD v2.0-draft.7 (the CLI line; remains the reference for every section v3 inherits unchanged) |
 
