@@ -5,7 +5,7 @@
 ## What it does
 
 - Nobody can delete the default branch or force-push to it, maintainers included.
-- Every change goes through a pull request, merged by squashing, so its Conventional Commit title becomes the commit release-please reads. No approval is required, so a maintainer working alone isn't blocked; the checks below are what guard the branch.
+- Every change goes through a pull request. Pull requests are squash-merged; a long-lived branch such as `feat/specification-phase` may be merged with a merge commit to keep its history. Either way the commit is titled by the pull request's Conventional Commit title. No approval is required, so a maintainer working alone isn't blocked; the checks below are what guard the branch.
 - The CI jobs listed under `required_status_checks` must pass before a merge, and only GitHub Actions can report them (`integration_id` 15368).
 - Copilot's pull requests need no extra approval, so automated pull requests aren't held.
 

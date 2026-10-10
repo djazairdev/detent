@@ -55,7 +55,7 @@ If `parity:check` or `prompts:check` fails, run `npm run parity` or `npm run pro
 
    A scope in brackets is optional: `fix(referee): …`. A check fails until the title fits, and you can edit the title at any time.
 
-CI runs the checks on every pull request. A maintainer reviews it; we may ask for changes, which is normal. Pull requests are squash-merged, so the title becomes the commit's message.
+CI runs the checks on every pull request. A maintainer reviews it; we may ask for changes, which is normal. Pull requests are squash-merged, so the title becomes the commit's message. A maintainer may merge a long-lived branch with a merge commit instead, to keep its history; the merge commit takes the title too.
 
 ## Our pledge
 
