@@ -23,9 +23,11 @@ import { TOOL_DESCRIPTIONS, TOOL_INPUTS, TOOL_NAMES, callTool, isToolError } fro
 /**
  * The one deliberate version string for the v3 surface (SEC-2): the MCP server
  * declares it, and the plugin manifest must carry the same value — a T-110
- * test pins the two together so neither can drift alone.
+ * test pins the two together so neither can drift alone. release-please moves
+ * it with the manifest at each release (x-release-please-start-version).
  */
 export const REFEREE_VERSION = "3.1.0";
+/* x-release-please-end: closes the block release-please rewrites above (SEC-2). */
 
 export function buildServer(core: RefereeCore): Server {
   const server = new Server(

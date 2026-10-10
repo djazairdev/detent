@@ -1,10 +1,12 @@
 # Detent
 
-[![ci](https://github.com/AmineYagoub/detent/actions/workflows/ci.yml/badge.svg)](https://github.com/AmineYagoub/detent/actions/workflows/ci.yml)
-[![release](https://img.shields.io/github/v/release/AmineYagoub/detent?display_name=tag&sort=semver)](https://github.com/AmineYagoub/detent/releases)
+[![ci](https://github.com/djazairdev/detent/actions/workflows/ci.yml/badge.svg)](https://github.com/djazairdev/detent/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/djazairdev/detent?display_name=tag&sort=semver)](https://github.com/djazairdev/detent/releases)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![node ≥ 22](https://img.shields.io/badge/node-%E2%89%A5%2022-brightgreen.svg)](.github/workflows/ci.yml)
-[![N-7 self-build](https://github.com/AmineYagoub/detent/actions/workflows/self-build.yml/badge.svg)](docs/release-checklist.md)
+[![N-7 self-build](https://github.com/djazairdev/detent/actions/workflows/self-build.yml/badge.svg)](docs/release-checklist.md)
+[![Good first issues](https://img.shields.io/github/issues/djazairdev/detent/good%20first%20issue?label=good%20first%20issues&color=7057ff)](https://github.com/djazairdev/detent/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+[![Improvements](https://img.shields.io/github/issues/djazairdev/detent/enhancement?label=improvements&color=a2eeef)](https://github.com/djazairdev/detent/issues?q=is%3Aissue+is%3Aopen+label%3Aenhancement+sort%3Areactions-%2B1-desc)
 
 Detent turns planning documents into merged, reviewed, test-gated code using
 fresh, single-purpose Claude Code sessions whose every consequential move is
@@ -29,10 +31,12 @@ Detent maintains itself under the same rules: the N-7 self-build gate,
 Detent building its own walking skeleton from its own PRD, is a permanent
 release requirement, not a demo.
 
+Detent is built and maintained in Algeria, as part of [djazairdev](https://github.com/djazairdev).
+
 ## Install
 
 ```bash
-claude plugin marketplace add AmineYagoub/detent
+claude plugin marketplace add djazairdev/detent
 ```
 
 ```bash
@@ -42,6 +46,10 @@ claude plugin install detent@detent
 For development, load the checkout with `claude --plugin-dir /path/to/detent`.
 The headless driver is the same referee under a deterministic loop, for CI
 and unattended runs.
+
+Using Detent on an existing or a new project, and what it does to your working
+tree, is in [docs/using-detent.md](docs/using-detent.md). Releases follow
+[docs/release-checklist.md](docs/release-checklist.md).
 
 ## The golden path
 
@@ -124,25 +132,6 @@ the fix ladder. Every arrow is a referee-admitted transition, journaled to
 ceiling routes to a human, never to a retry; a risk-labelled ticket takes
 one extra stop at your approval before DONE.
 
-## Works with existing and new projects
-
-**Existing projects** are the primary case, however far along: Detent binds
-to the repo's own verification commands, plans from your planning documents,
-and works on a run branch: the existing code and history are read, never
-rewritten. Scope the document to the work that REMAINS; the generated
-tickets are presented for your approval before anything runs, and they are
-editable: prune any the codebase already satisfies. If a stale ticket
-slips through, the session discovers the premise is already met, signals it,
-and stops rather than writing duplicate code. Start from a green suite:
-gates run your own commands, and pre-existing failures would be blamed on
-the first ticket. Plan increment by increment: an approved plan stays
-frozen, and `detent init --replan` starts the next one.
-
-**New projects** need only a folder containing the planning document:
-Detent derives the stack, scaffolds through its own bootstrap ticket, and
-builds from nothing. That path is the permanent release gate: every Detent
-release must build Detent's own walking skeleton from its own PRD.
-
 ## Models
 
 Every session runs on Claude Opus 5.5 or Claude Sonnet 5.5. `init` writes this
@@ -203,17 +192,6 @@ for you or was falsified earlier in the run starts one level higher.
 | `2` | not ready (no or unapproved plan, binding drift) |
 | `1` | error |
 
-## Your working tree
-
-During a run Detent works in a per-ticket git worktree under
-`.detent/worktrees/`, merged `--no-ff` into the run branch when the ticket is
-done — never into your base branch. Your own checkout is left alone.
-
-`--no-worktree` runs in your checkout instead. Say so deliberately: in that mode
-Detent resets uncommitted tracked changes at resume, moves untracked files it
-does not own aside, and stages the tree when a ticket finalizes. Those are the
-right behaviours for a tree Detent owns and the wrong ones for yours.
-
 ## Plumbing
 
 Documented, scriptable, and never required on the golden path:
@@ -243,6 +221,29 @@ While `init` is in a costly step, `detent status` shows the step, the units done
 and left, what they have spent so far, and an estimated finish from the figures
 its note gave; after a stop, it shows the step the stop left and how far it got.
 
+## Make your first contribution
+
+1. Pick an issue labelled [good first issue](https://github.com/djazairdev/detent/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
+2. Comment on it to say you're working on it.
+3. Follow [CONTRIBUTING.md](CONTRIBUTING.md) to set up, test and open a pull request, and the rules in [AGENTS.md](AGENTS.md).
+4. We reply to newcomers' pull requests within 7 days. A review or a merge may take longer.
+
+You can help without writing code, too: improve the docs, or run Detent on a project of yours and report what went wrong.
+
+## Feedback
+
+- [Ask a question](https://github.com/orgs/djazairdev/discussions/categories/q-a)
+- [Report a bug](https://github.com/djazairdev/detent/issues/new?template=bug.yml)
+- [Suggest an improvement](https://github.com/djazairdev/detent/issues/new?template=idea.yml), or 👍 the [improvements](https://github.com/djazairdev/detent/issues?q=is%3Aissue+is%3Aopen+label%3Aenhancement+sort%3Areactions-%2B1-desc) you want most
+- [Propose a new project](https://github.com/djazairdev/djazair.dev/discussions/categories/ideas) for Algeria
+- Follow djazairdev on [Facebook](https://www.facebook.com/djazairdev) and [X](https://x.com/djazairdev) for news
+
+Ask in Arabic, Tamazight, French or English. Code, docs and issue titles are in English, so everyone can search them. Report security problems [privately](https://github.com/djazairdev/detent/security/policy), never in an issue.
+
 ## License
 
 [MIT](LICENSE).
+
+---
+
+Part of [djazairdev](https://github.com/djazairdev): growing Algeria's open-source community through useful projects, welcoming first contributions and collaboration. Find more projects in the [djazair.dev Hub](https://djazair.dev/en/hub/). Everyone follows our [code of conduct](https://github.com/djazairdev/.github/blob/main/CODE_OF_CONDUCT.md).
