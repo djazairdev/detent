@@ -14,6 +14,13 @@ import {
 } from "../../src/kernel/run.js";
 import { RunJournal } from "../../src/kernel/journal.js";
 import { readTicket } from "../../src/kernel/tickets/readers.js";
+import { requeueTicket } from "../../src/kernel/plumbing.js";
+import { acquireRunLock } from "../../src/kernel/run-lock.js";
+import { claim } from "../../src/kernel/tickets/mutations.js";
+import { writePlan } from "../../src/init/plan-write.js";
+import { planHash } from "../../src/init/machine.js";
+import { mkdirSync } from "node:fs";
+import { tmpTree } from "../helpers.js";
 import { prefixHash } from "../../src/sessions/backend.js";
 import { MockBackend, okResult, type StageFn } from "../../src/sessions/mock.js";
 import { loadPromptSet } from "../../src/sessions/prompts.js";
@@ -28,6 +35,8 @@ import {
   researchValid,
   reviewApprove,
 } from "./run-fixture.js";
+import { SCHEMA_VERSION } from "../../src/schemas/common.js";
+import { loadConfig } from "../../src/kernel/worstcase.js";
 
 /**
  * T-041 — the kernel run loop. Four oracle e2e ports plus the plan's AC
@@ -151,6 +160,380 @@ describe("T-041 oracle full ladder (test_ladder_exhausts_to_needs_human_with_dos
     expect(dossier.suggested_resolutions.length).toBeGreaterThan(0);
     expect(existsSync(path.join(root, ".detent/runs/t1/last_failure.json"))).toBe(true);
     expect(readTicket(root, "t1").generations.at(-1)).toMatchObject({ outcome: "needs_human" });
+  });
+});
+
+/**
+ * B-5′ (PRDR-131) — the crash skip belongs to the generation that crashed.
+ *
+ * `unfinished` counted `start` against `end` over the ticket's WHOLE journal
+ * and the skip event rebalanced neither, so one killed session suppressed that
+ * role on that ticket forever. The ladder still spent real money fixing an
+ * implementation that had never been written, and requeue — the documented
+ * remedy — could not clear it. Both halves are asserted here, because the
+ * within-generation skip is B-5 working and must survive the fix.
+ */
+/**
+ * Phase-2 remediation: V-1″ (PRDR-135), X-1⁷ (PRDR-147), S-4″ (PRDR-138).
+ */
+describe("V-1″ a run with nothing bound verifies nothing, and refuses", () => {
+  it("refuses at startup when no `test` gate is bound, rather than greening every gate", async () => {
+    const root = await fixture();
+    addTicket(root, { id: "t1" });
+    /* The gate used to read "no binding matched" as a pass and march the ticket to DONE. */
+    writeFileSync(path.join(root, ".detent", "bindings.json"), JSON.stringify({ schema_version: SCHEMA_VERSION, bindings: [], skips: [] }));
+    const backend = new MockBackend({ implement: implementGreen, review: reviewApprove });
+    const outcome = await run(opts(root, backend));
+    expect(outcome.exitCode).toBe(EXIT_NOT_READY);
+    expect(JSON.stringify(outcome.summary)).toContain("no `test` gate is bound");
+    expect(readTicket(root, "t1").state).toBe("READY");
+    expect(backend.rolesLaunched()).toEqual([]);
+  });
+});
+
+/**
+ * C-9‴ (PRDR-139) / X-1⁗ (PRDR-140) / B-2″ (PRDR-145b) — phase 3.
+ */
+/**
+ * PRDR-144 — an EMPTY diff reaching a reviewer.
+ *
+ * P7′ (PRDR-130) showed a swallowed git error handed the reviewer `""`, which
+ * is under `DIFF_BODY_CAP`, so the "never truncate silently" banner never
+ * fired and a ticket was judged against nothing. That was found by reading the
+ * code, not by a test: nothing in the suite asserted what a review receives or
+ * does when the diff is empty.
+ */
+describe("PRDR-144 a review handed an empty diff", () => {
+  it("the reviewer is given the empty diff verbatim, and its verdict still governs", async () => {
+    const root = await fixture();
+    addTicket(root, { id: "t1" });
+    let sawDiff: string | null = null;
+    let hadDiffKey = false;
+    /* A session that commits nothing: the gate is green on the unchanged tree. */
+    const implementNothing: StageFn = () => okResult();
+    const capturing: StageFn = (spec) => {
+      /**
+       * PRDR-160: no `?? ""`. It made a MISSING `diff` key indistinguishable
+       * from an empty one, so a refactor that dropped the key entirely would
+       * leave this green and the guarantee would evaporate silently. The key
+       * being present is half of what this asserts.
+       */
+      const inputs = (JSON.parse(spec.promptVariable) as { inputs: Record<string, unknown> }).inputs;
+      hadDiffKey = Object.hasOwn(inputs, "diff");
+      sawDiff = inputs["diff"] as string | undefined ?? null;
+      return reviewApprove(spec);
+    };
+    await run(opts(root, new MockBackend({ implement: implementNothing, review: capturing })));
+
+    expect(hadDiffKey, "the reviewer must be launched, and its inputs must carry a `diff` key at all").toBe(true);
+    expect(sawDiff, "an empty diff reaches the reviewer as empty — not as a banner, not as a throw").toBe("");
+    /*
+     * And the verdict is what decides: Detent does not second-guess an approve
+     * on an empty diff, which is precisely why the reviewer must be able to SEE
+     * that it is empty. If that ever changes to a kernel-side refusal, this
+     * assertion is where it should be stated.
+     */
+    expect(readTicket(root, "t1").state).toBe("DONE");
+  });
+});
+
+describe("C-9‴ a run executes only the plan a human approved", () => {
+  it("refuses when a ticket's approved content changed after the approval", async () => {
+    const root = await fixture();
+    addTicket(root, { id: "t1" });
+    /* Edit what a human approved — not the run state stored beside it. */
+    const file = path.join(root, ".detent/plan/t1.json");
+    const t = JSON.parse(readFileSync(file, "utf8")) as { acceptance_criteria: string[] };
+    t.acceptance_criteria = [...t.acceptance_criteria, "and something nobody approved"];
+    writeFileSync(file, JSON.stringify(t, null, 2));
+
+    const outcome = await run(opts(root, new MockBackend()));
+    expect(outcome.exitCode).toBe(EXIT_NOT_READY);
+    expect(JSON.stringify(outcome.summary)).toContain("different plan");
+  });
+
+  /**
+   * The check is only safe because `planHash` covers the APPROVED fields. It
+   * used to hash whole ticket files, which `writeTicket` rewrites on every
+   * transition — so this check would have refused every resume.
+   */
+  it("a resume of an approved plan still runs, though the run has rewritten its tickets", async () => {
+    const root = await fixture();
+    addTicket(root, { id: "t1" });
+    /*
+     * PRDR-153: NO intervening `addTicket`. It calls `approveFixturePlan`, which
+     * re-stamps the hash from whatever is on disk — so the original version of
+     * this test would have passed even if `planHash` still covered whole ticket
+     * files, which is the very thing it claims to prove. The approval must be
+     * the one given BEFORE run 1 rewrote anything.
+     */
+    addTicket(root, { id: "t2" });
+    const approvedHash = JSON.parse(readFileSync(path.join(root, ".detent/plan/approval.json"), "utf8")) as { plan_hash: string };
+
+    const first = await run(opts(root, new MockBackend({ implement: implementGreen, review: reviewApprove })));
+    expect(first.exitCode).toBe(EXIT_OK);
+    /* Both tickets now carry DONE states, counters and notes they lacked at approval. */
+    expect(readTicket(root, "t1").state).toBe("DONE");
+    const still = JSON.parse(readFileSync(path.join(root, ".detent/plan/approval.json"), "utf8")) as { plan_hash: string };
+    expect(still.plan_hash, "the approval was not re-stamped").toBe(approvedHash.plan_hash);
+
+    const resumed = await run(opts(root, new MockBackend({ implement: implementGreen, review: reviewApprove })));
+    expect(resumed.exitCode, "a rewritten ticket file must not read as an edited plan").toBe(EXIT_OK);
+  });
+
+  /**
+   * PRDR-152: `APPROVED_FIELDS` listed `depends_on` — a DRAFTED ticket's field
+   * name — so it hashed a key that is always absent and ignored `blockers` and
+   * `waits_on`, the two that hold the dependency graph. A ticket's edges could
+   * be rewritten after approval and C-9's check would not notice.
+   *
+   * This asserts against the SCHEMA rather than a remembered list, so a field
+   * added to a ticket later cannot be silently left out of what a human is
+   * taken to have approved.
+   */
+  it("every ticket field is either approved-content or declared run state — nothing is silently ignored", async () => {
+    const root = await fixture();
+    addTicket(root, { id: "t1" });
+    const file = path.join(root, ".detent/plan/t1.json");
+    const ticket = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    /**
+     * The fields that legitimately change DURING a run. `waits_on` is set by
+     * X-4′ dependency discovery (`dependency.ts`) and `links` by X-6 discovery
+     * (`linkDiscovered`) — PRDR-152 briefly treated both as approved content,
+     * which refused the next resume of any run that discovered anything.
+     * `blockers` is genuinely plan-time: no run-time writer exists.
+     */
+    /* PRDR-227: `granted` is written by the kernel after a session (a surface grant) and subtracted from the approved surface. */
+    const runState = new Set(["schema_version", "state", "generations", "notes", "waits_on", "links", "granted"]);
+
+    for (const field of Object.keys(ticket)) {
+      if (runState.has(field)) continue;
+      const before = planHash(root);
+      const mutated = { ...ticket, [field]: Array.isArray(ticket[field]) ? [...(ticket[field] as unknown[]), "x"] : `${String(ticket[field])}-edited` };
+      writeFileSync(file, JSON.stringify(mutated, null, 2));
+      expect(planHash(root), `editing \`${field}\` after approval is invisible to C-9`).not.toBe(before);
+      writeFileSync(file, JSON.stringify(ticket, null, 2));
+    }
+  });
+
+  it("a replan refuses to delete a ticket a live process has claimed", async () => {
+    const root = await fixture();
+    addTicket(root, { id: "t1" });
+    /* A live claim: this process. */
+    expect(claim(root, "t1", "w1")).toBe(true);
+    /* A plan that no longer contains t1, so the orphan sweep reaches it. */
+    const replacement = [
+      {
+        id: "t9",
+        type: "feature" as const,
+        title: "replacement",
+        description: "",
+        acceptance_criteria: ["it works"],
+        non_goals: [],
+        surface: ["src/**"],
+        depends_on: [],
+        provides: [],
+        consumes: [],
+        requirement_ids: [],
+        baseline_ids: [],
+        criterion_ids: [],
+        risk_label: false,
+        slice: "s01",
+      },
+    ];
+    expect(() =>
+      writePlan({ root, greenfield: false, stack: null, docs: [], boundSlots: [] }, replacement, []),
+    ).toThrow(/claimed by a live process/);
+    expect(existsSync(path.join(root, ".detent/plan/t1.json")), "the ticket must survive").toBe(true);
+  });
+});
+
+describe("X-1⁗ the wall clock is enforced where the work is launched", () => {
+  it("breaches through the referee rather than only through the headless loop", async () => {
+    const root = await fixture();
+    addTicket(root, { id: "t1" });
+    /*
+     * Advance the clock rather than backdate the claim: the run takes its own
+     * claim with `wx`, so a pre-existing one makes the ticket read as held by
+     * someone else and it is skipped entirely. A zero ceiling is refused by the
+     * X-1 worst-case check at config load, so that route is closed too.
+     */
+    /*
+     * PRDR-153: a clock that ADVANCES, by just over the default ceiling per
+     * read. Claim time and the check now read the same injectable clock — they
+     * used to be two different ones, which is why this check never fired under
+     * a frozen fixture clock — so a constant offset yields zero elapsed, and
+     * counting calls is fragile because `iso()` is read many times per stage.
+     */
+    let clock = Date.now();
+    const advancing = (): number => (clock += 3_600_001);
+    const outcome = await run({ ...opts(root, new MockBackend({ implement: implementGreen, review: reviewApprove })), now: advancing });
+    expect(JSON.stringify(outcome.summary)).toContain("wall clock");
+  });
+});
+
+describe("X-1⁷ one run per root", () => {
+  it("a second run against the same root refuses and names the holder", async () => {
+    const root = await fixture();
+    addTicket(root, { id: "t1" });
+    const held = acquireRunLock(root);
+    expect(held.ok).toBe(true);
+    try {
+      const outcome = await run(opts(root, new MockBackend({ implement: implementGreen, review: reviewApprove })));
+      expect(outcome.exitCode).toBe(EXIT_NOT_READY);
+      expect(JSON.stringify(outcome.summary)).toContain("another run holds this root");
+    } finally {
+      if (held.ok) held.release();
+    }
+  });
+
+  it("a completed run leaves no lock behind", async () => {
+    const root = await fixture();
+    addTicket(root, { id: "t1" });
+    await run(opts(root, new MockBackend({ implement: implementGreen, review: reviewApprove })));
+    expect(existsSync(path.join(root, ".detent", "state", "run.lock"))).toBe(false);
+  });
+
+  /**
+   * The lock sat at `.detent/run.lock` — committed territory — and
+   * `finalizeDone` runs `git add -A` in the default non-worktree mode, so a run
+   * would have COMMITTED its own lock. On another machine the host would not
+   * match, so `runLockBreakable` refuses to break it: a lock that travels is a
+   * lock nobody can clear.
+   */
+  it("the lock is local run state and never travels — git does not see it", async () => {
+    const root = await fixture();
+    const held = acquireRunLock(root);
+    expect(held.ok).toBe(true);
+    try {
+      const tracked = git(root, "status", "--porcelain", "--untracked-files=all");
+      expect(tracked, "the run lock must be gitignored").not.toContain("run.lock");
+      expect(existsSync(path.join(root, ".detent", "state", "run.lock"))).toBe(true);
+    } finally {
+      if (held.ok) held.release();
+    }
+  });
+
+  it("a lock left by a dead process on this host is breakable; a live one is not", () => {
+    const root = tmpTree({});
+    roots.push(root);
+    mkdirSync(path.join(root, ".detent", "state"), { recursive: true });
+    const mine = acquireRunLock(root, { pid: 4242, alive: () => false });
+    expect(mine.ok).toBe(true);
+    /* Dead holder, same host: broken and taken. */
+    const after = acquireRunLock(root, { pid: 5, alive: () => false });
+    expect(after.ok).toBe(true);
+    expect(after.ok && after.brokeStale?.pid).toBe(4242);
+    /* Live holder: refused. */
+    expect(acquireRunLock(root, { pid: 6, alive: () => true }).ok).toBe(false);
+  });
+});
+
+/**
+ * PRDR-151 — `finalize` breaching, and a COVERAGE GAP recorded rather than
+ * papered over.
+ *
+ * `finalize` sat outside `processTicket`'s breach handler, so a worktree merge
+ * conflict escaped, `loop()` rethrew it, and the run exited 1 with the
+ * generation left `in_flight` and `detent status` showing nothing wrong. That
+ * is fixed in `driver.ts`, and `mergeWorktree`'s half is covered by
+ * `tests/kernel/git.test.ts` ("B-2′ a conflicting worktree merge…").
+ *
+ * The DRIVER-level routing is NOT covered here. Forcing a conflict through the
+ * real loop needs two worktrees alive at once, and the driver is sequential —
+ * t1 merges before t2's worktree can diverge from it. The resume shape (a
+ * worktree surviving from an earlier claim) was tried and did not reproduce it
+ * either. Rather than ship a test that passes without exercising the condition
+ * it names — the defect this line has spent a day removing — the gap is written
+ * down. It belongs with PRDR-144's worktree coverage, where a fixture can be
+ * built deliberately instead of squeezed out of the happy path.
+ */
+
+describe("S-4″ a transport death is a crash, not a success", () => {
+  it("a telemetry-less session is recorded as a crash and halts the run, rather than as a success", async () => {
+    const root = await fixture();
+    for (const id of ["t1", "t2", "t3", "t4"]) addTicket(root, { id });
+    /* `ok: true, telemetryParsed: false` is what a stream ending with no result message parses as. */
+    /**
+     * PRDR-151: the PRODUCTION shape. `parseResultMessage` hard-codes
+     * `turns: 0` whenever telemetry is absent, and it is the only producer of
+     * `telemetryParsed: false` — so `okResult({ telemetryParsed: false })`,
+     * whose `turns` defaults to 1, is a shape the product cannot emit. The
+     * first version of this test used it, which is the unrealistic-fixture
+     * pattern this line has been auditing for, in the test written to close it.
+     */
+    const backend = new MockBackend({ implement: () => okResult({ telemetryParsed: false, turns: 0 }) });
+    const sleeps: number[] = [];
+    const outcome = await run({ ...opts(root, backend), sleep: async (ms) => void sleeps.push(ms) });
+
+    /*
+     * The substance of S-4″: it used to parse as ok:true with no `crashed`
+     * flag, so the ledger took an unflagged $0 row, the journal recorded a
+     * successful end for a session that died on the wire, and the run marched
+     * on. It now halts, and the row says what happened.
+     */
+    expect(outcome.exitCode).not.toBe(0);
+    const rows = readFileSync(path.join(root, ".detent", "ledger.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .map((l) => JSON.parse(l) as { partial?: string; role: string });
+    const implementRows = rows.filter((r) => r.role === "implement");
+    expect(implementRows.length).toBeGreaterThan(0);
+    for (const r of implementRows) expect(r.partial, "a session that died on the wire is a crash").toBe("crash");
+  });
+});
+
+describe("B-5′ a crash suppresses the relaunch within its generation, and not beyond it", () => {
+  it("the implement session is skipped on resume, then LAUNCHES again after a requeue opens a new generation", async () => {
+    const root = await fixture();
+    addTicket(root, { id: "t1" });
+
+    /* A session that began work and died: the gate is left RED, as after an OOM kill. */
+    const crashingImplement: StageFn = (spec) => {
+      writeTree(spec.cwd, { ".fail": "half-written work\n" });
+      throw new Error("simulated OOM kill");
+    };
+    /* What a working implement session would do — clear the failure and commit. */
+    const implementRepairs: StageFn = (spec) => {
+      rmSync(path.join(spec.cwd, ".fail"), { force: true });
+      writeTree(spec.cwd, { [`src/feature-${spec.ticketId}.txt`]: "done\n" });
+      git(spec.cwd, "add", "-A");
+      git(spec.cwd, "commit", "-q", "-m", `${spec.ticketId}: implement`);
+      return okResult();
+    };
+
+    /* 1. The implement session dies mid-flight, leaving a `start` with no `end`. */
+    const first = new MockBackend({ implement: crashingImplement });
+    expect((await run(opts(root, first))).exitCode).toBe(EXIT_ERROR);
+    expect(first.rolesLaunched().filter((r) => r === "implement")).toHaveLength(1);
+
+    /*
+     * 2. Resume in the SAME generation: B-5 holds — the session is not
+     *    relaunched, the gate judges the tree as-is, and the ladder exhausts
+     *    onto the human. This half must survive the fix.
+     */
+    const second = new MockBackend({ implement: implementRepairs, review: reviewApprove });
+    await run(opts(root, second));
+    expect(second.rolesLaunched()).not.toContain("implement");
+    const crashed = readTicket(root, "t1");
+    expect(crashed.state).toBe("NEEDS_HUMAN");
+
+    /* 3. A requeue opens a fresh generation with zeroed counters (X-8). */
+    const requeue = requeueTicket(root, "t1", "operator", "try again");
+    expect(requeue.exitCode).toBe(0);
+    expect(readTicket(root, "t1").generations.length).toBe(crashed.generations.length + 1);
+
+    /*
+     * 4. The new generation must actually implement. Before B-5′ it launched
+     *    nothing — on this generation or any later one — so the gate ran on the
+     *    same unchanged tree, went red again, and the ladder burned blind_fix,
+     *    research and informed_fix on work that had never been written. The
+     *    documented remedy could not clear it.
+     */
+    const third = new MockBackend({ implement: implementRepairs, review: reviewApprove });
+    await run(opts(root, third));
+    expect(third.rolesLaunched()).toContain("implement");
+    expect(readTicket(root, "t1").state).toBe("DONE");
   });
 });
 
@@ -280,13 +663,29 @@ describe("T-041 X-1 enforcement fixtures", () => {
     expect(transitions(root).at(-1)).toMatchObject({ event: "BUDGET_BREACH", to: "NEEDS_HUMAN" });
   });
 
-  it("the net-sessions backstop trips at launch (unreachable via loadConfig — tested via runWithConfig)", async () => {
+  /**
+   * PRDR-265 turned this test into the demonstration its own ticket rests on.
+   *
+   * It used to assert that `sessions: 1` refused the blind fix at launch —
+   * "exactly one launch (implement)" — and the run ended on a ceiling. That
+   * backstop is gone: `sessions` counts. What ends the run instead is the
+   * escalation LADDER, which this ticket deliberately did not touch, and this
+   * is the whole-run evidence that the carve-out was the right call. The ticket
+   * still reaches NEEDS_HUMAN, and it gets there by running out of rungs rather
+   * than out of budget — one blind fix, one research session, one informed fix,
+   * then `machine.ts`'s direct edge to NEEDS_HUMAN.
+   *
+   * A regression that made any ladder key count-only shows up here as a run
+   * that does not stop.
+   */
+  it("a sessions ceiling of 1 stops nothing, and the ladder still terminates the ticket", async () => {
     const root = await fixture();
     addTicket(root, { id: "t1" });
 
     const loaded = {
       config: {
-        schema_version: 1 as const,
+        /* Every key but these two as a config that names none gets it, so a key the schema gains needs nothing here. */
+        ...loadConfig({ schema_version: SCHEMA_VERSION, budgets: {}, pinned: { agent_sdk: "0.3.280", claude_code: "2.1.191" } }).config,
         budgets: {
           blind_fix_attempts: 1 as const,
           informed_fix_attempts: 1 as const,
@@ -298,17 +697,17 @@ describe("T-041 X-1 enforcement fixtures", () => {
           turns_per_stage: 30,
           failure_research_tool_calls: 8,
           planning_research_tool_calls: 16,
+          spec_validation_rounds: 8,
+          init_sessions_at_once: 4,
           flake_reruns: 1,
           gate_timeout_ms: 900_000,
           binding_probe_timeout_ms: 120_000,
           run_spend_usd: 999,
+          spend_without_progress_floor_usd: 999,
+          spend_without_progress_multiple: 3,
+          spend_without_progress_sessions: 999,
         },
-        protected: [],
-        risk: [],
-        model_routing: {},
-        pinned: { agent_sdk: "0.3.191", claude_code: "2.1.191" },
-        setting_sources: [],
-        plan_docs: [],
+        symbols: { enabled: false, command: "serena-agent", pinned: "0.1.4" },
       },
       computedWorstCase: 14,
     };
@@ -317,11 +716,12 @@ describe("T-041 X-1 enforcement fixtures", () => {
     const outcome = await runWithConfig(opts(root, backend), loaded);
 
     expect(outcome.exitCode).toBe(EXIT_HUMAN_GATED);
-    /** Exactly one launch (implement); the blind fix was refused at launch. */
-    expect(backend.calls.map((c) => c.role)).toEqual(["implement"]);
+    expect(
+      backend.calls.map((c) => c.role),
+      "four sessions against a ceiling of one: the number is counted, and it orders nothing",
+    ).toEqual(["implement", "blind_fix", "research", "informed_fix"]);
     const t1 = readTicket(root, "t1");
-    expect(t1.state).toBe("NEEDS_HUMAN");
-    expect(t1.notes.map((n) => n.text).join(" ")).toContain("net session ceiling");
+    expect(t1.state, "and the run still ends — on the ladder's own terminator, not on a budget").toBe("NEEDS_HUMAN");
   });
 });
 
@@ -404,7 +804,7 @@ describe("T-041 exit codes are public API (C-11)", () => {
     );
     expect(outcome.exitCode).toBe(EXIT_HUMAN_GATED);
     const parsed = JSON.parse(JSON.stringify(outcome.summary)) as typeof outcome.summary;
-    expect(parsed.schema_version).toBe(1);
+    expect(parsed.schema_version).toBe(SCHEMA_VERSION);
     expect(parsed.pending[0]).toMatchObject({ id: "t1", state: "NEEDS_HUMAN" });
   });
 });
@@ -416,7 +816,7 @@ describe("T-041 stale claims never spin the loop (C-9/C-12)", () => {
     addTicket(root, { id: "t2" });
     /**
      * t1 sits mid-flight under ANOTHER LIVE worker's claim (this process's
-     * own pid — unambiguously alive on every OS). C-9′/PRDR-079: only a
+     * own pid — unambiguously alive on every OS). C-9⁗/PRDR-079: only a
      * verifiably DEAD owner's claim self-heals (tested in
      * claim-self-heal.test.ts); a live peer's claim is never guessed about.
      */
@@ -479,5 +879,35 @@ describe("T-041 S-4 breaker in the loop", () => {
     const t1 = readTicket(root, "t1");
     expect(t1.state).toBe("NEEDS_HUMAN");
     expect(t1.notes.map((n) => n.text).join(" ")).toContain("telemetry");
+  });
+});
+
+/**
+ * S-5 (PRDR-181) — the pinned CLI version is checked on the path that runs.
+ *
+ * `SessionBackend.checkVersion` had one production caller — `doctor`, behind
+ * `--smoke` — so `detent run` never verified the pin, while `doctor` without
+ * `--smoke` reports it as "checked at run time". It was checked nowhere.
+ */
+describe("S-5 run verifies the pinned backend version before it spends", () => {
+  it("refuses when the backend reports a pin mismatch, without launching", async () => {
+    const { root } = await makeRunRepo();
+    roots.push(root);
+    addTicket(root, { id: "t-1" });
+    let launched = 0;
+    const backend = new MockBackend({ implement: implementGreen, review: reviewApprove });
+    backend.checkVersion = async (): Promise<void> => {
+      throw new Error("claude-code 9.9.9 does not match the pinned 1.0.0 (S-5)");
+    };
+    const spy = backend.run.bind(backend);
+    backend.run = async (spec) => {
+      launched += 1;
+      return spy(spec);
+    };
+
+    const outcome = await run({ root, backend, prompts: PROMPTS, runId: "pin" });
+    expect(outcome.exitCode, "a pin mismatch is a precondition failure, not a crash").toBe(2);
+    expect(outcome.summary.reason ?? "", "and it names the mismatch").toContain("pinned");
+    expect(launched, "nothing may launch behind a failed precondition").toBe(0);
   });
 });

@@ -1,10 +1,11 @@
 import { z } from "zod";
+import { amendmentEditSchema } from "../schemas/amendment.js";
 import {
   ATTEMPT_STATES,
   Breach,
   DriftHaltSignal,
   EscrowError,
-  SpendExhaustedError,
+  SessionRefusal,
   TransitionError,
   type RefereeCore,
 } from "../kernel/referee.js";
@@ -28,7 +29,7 @@ export type ToolName = (typeof TOOL_NAMES)[number];
 
 export interface RefereeToolError {
   readonly error: {
-    readonly code: "DRIFT_HALT" | "BREACH" | "ILLEGAL_TRANSITION" | "BAD_EVIDENCE" | "INVALID_INPUT" | "UNKNOWN_TOOL";
+    readonly code: "DRIFT_HALT" | "BREACH" | "REFUSED" | "ILLEGAL_TRANSITION" | "BAD_EVIDENCE" | "INVALID_INPUT" | "UNKNOWN_TOOL";
     readonly message: string;
   };
 }
@@ -56,7 +57,7 @@ const claimOutput = z.object({
 });
 
 const attemptInput = z.object({ ticket_id: ticketId, state: z.enum(ATTEMPT_STATES) }).strict();
-const attemptOutput = z.object({ falsified_ref: z.string().optional() });
+const attemptOutput = z.object({ falsified_ref: z.string().optional(), oversized_ref: z.string().optional() });
 
 const gateInput = z
   .object({ ticket_id: ticketId, close_check: z.boolean().optional(), escalate_reason: z.string().optional() })
@@ -89,6 +90,19 @@ const recordInput = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("dossier"), ticket_id: ticketId, reason: z.string() }).strict(),
   z.object({ kind: z.literal("finalize"), ticket_id: ticketId }).strict(),
   z.object({ kind: z.literal("drift_halt") }).strict(),
+  /* X-4⁸ (PRDR-286): the operator's decision on an amendment a session filed. */
+  z
+    .object({
+      kind: z.literal("amendment"),
+      amendment_id: z.string().regex(/^AM-\d{3,}$/u),
+      by: z.string().min(1),
+      decision: z.discriminatedUnion("kind", [
+        z.object({ kind: z.literal("approve") }).strict(),
+        z.object({ kind: z.literal("edit"), edits: z.array(amendmentEditSchema).min(1) }).strict(),
+        z.object({ kind: z.literal("reject"), reason: z.string().min(1) }).strict(),
+      ]),
+    })
+    .strict(),
 ]);
 
 const transitionInput = z.object({ ticket_id: ticketId, ref: z.string().min(1) }).strict();
@@ -112,7 +126,7 @@ export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   next: "The claimable pool: READY tickets plus unclaimed resumable in-flight tickets (C-9).",
   claim: "Atomically acquire or release one ticket's claim (R-2). A refused acquire names why.",
   attempt: "Launch the metered billable session for a state (R-4). The sole path to the backend.",
-  record: "Derive evidence: run a validator-backed stage, record a breach, a human act, or lifecycle bookkeeping.",
+  record: "Derive evidence: run a validator-backed stage, record a breach, a human act, lifecycle bookkeeping, or the operator's decision on an amendment.",
   gate: "Run the bound gates with drift assertion and the X-5 flake filter; returns an evidence ref.",
   transition: "Admit one evidence ref against its ticket (ARCH-1's single apply site). Illegal moves are refused.",
   status: "Read-only: every ticket's state, and the pending (human-gated) set.",
@@ -140,8 +154,19 @@ export async function callTool(core: RefereeCore, name: string, rawInput: unknow
     if (err instanceof DriftHaltSignal) {
       return { error: { code: "DRIFT_HALT", message: err.message } };
     }
-    if (err instanceof Breach || err instanceof SpendExhaustedError) {
+    /**
+     * PRDR-265: `Breach` alone. This arm also named `SpendExhaustedError` and
+     * `NoProgressError`, which had no throw site between them — PRDR-191
+     * converted `run_spend_usd` to an advisory total and left its exception
+     * wired in here, where it read as a live budget route for four releases.
+     * Both classes are gone with the ceilings that count instead of halting.
+     */
+    if (err instanceof Breach) {
       return { error: { code: "BREACH", message: err.message } };
+    }
+    /** PRDR-112: a backend refusal or outage is a structured route, so a driver can back off and retry. */
+    if (err instanceof SessionRefusal) {
+      return { error: { code: "REFUSED", message: err.message } };
     }
     if (err instanceof TransitionError) {
       return { error: { code: "ILLEGAL_TRANSITION", message: err.message } };
@@ -176,6 +201,7 @@ async function dispatch(core: RefereeCore, name: ToolName, input: unknown): Prom
       const result = await core.attempt(arg.ticket_id, arg.state);
       return attemptOutput.parse({
         ...(result.falsifiedRef !== undefined ? { falsified_ref: result.falsifiedRef } : {}),
+        ...(result.oversizedRef !== undefined ? { oversized_ref: result.oversizedRef } : {}),
       });
     }
     case "gate": {
@@ -233,5 +259,7 @@ async function dispatchRecord(core: RefereeCore, arg: z.infer<typeof recordInput
       return { ok: true };
     case "drift_halt":
       return { reason: core.driftHaltSweep() };
+    case "amendment":
+      return { ...core.decideAmendment(arg.amendment_id, arg.by, arg.decision) };
   }
 }

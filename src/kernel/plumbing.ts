@@ -4,6 +4,7 @@ import path from "node:path";
 import { stateDir } from "../fs/layout.js";
 import type { Ticket } from "../schemas/ticket.js";
 import { humanApproved, humanRequeue, type KernelEvent } from "./events.js";
+import { REQUEUEABLE } from "./machine.js";
 import { currentCounters, currentGeneration, openGeneration, withCurrentCounters } from "./generations.js";
 import { RunJournal } from "./journal.js";
 import { apply } from "./machine.js";
@@ -11,6 +12,8 @@ import { allTickets, readTicket, isClaimed } from "./tickets/readers.js";
 import { claimsDir } from "./tickets/paths.js";
 import { claimBreakable, pidAlive, readClaim, release, writeTicket, appendNote } from "./tickets/mutations.js";
 import { loadConfig, type LoadedConfig } from "./worstcase.js";
+import { decideAmendment, type AmendDecision, type AmendOutcome } from "./amendment-decide.js";
+import { acquireRunLock, lockHolder } from "./run-lock.js";
 
 /**
  * T-055 — `approve <id>` and `requeue <id>` (C-12, X-3, X-8).
@@ -21,8 +24,11 @@ import { loadConfig, type LoadedConfig } from "./worstcase.js";
  * `transitions.jsonl` inside the transition's evidence — an operator action
  * with the broken pid, without inventing an X-3 event to carry it.
  *
- * Legality is X-3's: `approve` only from NEEDS_HUMAN, `requeue` only from
- * NEEDS_HUMAN or BLOCKED. Approve re-enters APPROVED — the kernel re-verifies
+ * Legality is X-3's: `approve` only from NEEDS_HUMAN, `requeue` from any
+ * REQUEUEABLE state (X-8/PRDR-238 — the nine unfinished states, with APPROVED,
+ * DONE and READY excluded). This block said "NEEDS_HUMAN or BLOCKED" until
+ * PRDR-238 widened the table and updated the verb's own doc-block below without
+ * this one. Approve re-enters APPROVED — the kernel re-verifies
  * on the next run; a direct DONE does not exist. Requeue opens generation N+1
  * with zeroed counters while N stays frozen (D-17, the recorded divergence
  * from the oracle's in-place reset).
@@ -140,7 +146,7 @@ export function approveTicket(root: string, id: string, user: string, deps: Plum
 }
 
 /**
- * `detent requeue <id> [--guidance]`: NEEDS_HUMAN|BLOCKED → READY, opening
+ * `detent requeue <id> [--guidance]`: any REQUEUEABLE state → READY, opening
  * generation N+1 with zeroed counters; generation N stays frozen with its
  * record (X-8/D-17). The guidance is recorded on the generation it opens.
  */
@@ -155,10 +161,11 @@ export function requeueTicket(
   if (!guard.ok) return { exitCode: PLUMBING_EXIT_REFUSED, message: guard.refusal ?? "claimed" };
 
   const ticket = readTicket(root, id);
-  if (ticket.state !== "NEEDS_HUMAN" && ticket.state !== "BLOCKED") {
+  /** PRDR-238: the machine's own set, so this check cannot drift from the table. */
+  if (!REQUEUEABLE.includes(ticket.state)) {
     return {
       exitCode: PLUMBING_EXIT_REFUSED,
-      message: `requeue is admissible only from NEEDS_HUMAN or BLOCKED; ${id} is ${ticket.state} (X-3 offers no such row)`,
+      message: `requeue is admissible from ${REQUEUEABLE.join(", ")}; ${id} is ${ticket.state} (X-3 offers no such row)`,
     };
   }
 
@@ -202,6 +209,22 @@ export function unclaimTicket(root: string, id: string, user: string, deps: Plum
     return { exitCode: PLUMBING_EXIT_OK, message: `${id}: released stale claim (owner pid ${guard.brokeStale.pid} dead)` };
   }
   return { exitCode: PLUMBING_EXIT_OK, message: `${id}: no claim to release` };
+}
+
+/**
+ * `detent amend <AM-id>` (X-4⁸, PRDR-286): the operator's decision on an
+ * amendment, off a run. It changes the pack and commits, so it takes the run
+ * lock as `init` does: a live run refuses it, and decides the amendment at its
+ * own escalation (C-10).
+ */
+export function amendPlumbing(root: string, id: string, user: string, decision: AmendDecision): AmendOutcome {
+  const lock = acquireRunLock(root);
+  if (!lock.ok) return { ok: false, message: `a run holds this root (${lockHolder(lock.heldBy)}): decide ${id} at its escalation, or once it ends (X-4⁸)` };
+  try {
+    return decideAmendment(root, id, user, decision, new Date().toISOString());
+  } finally {
+    lock.release();
+  }
 }
 
 /** The post-crash sweep: releases every claim with a verifiably dead owner, reports the rest. */

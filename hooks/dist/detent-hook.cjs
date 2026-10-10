@@ -35,6 +35,7 @@ var require_constants = __commonJS({
     "use strict";
     var WIN_SLASH = "\\\\/";
     var WIN_NO_SLASH = `[^${WIN_SLASH}]`;
+    var DEFAULT_MAX_EXTGLOB_RECURSION = 0;
     var DOT_LITERAL = "\\.";
     var PLUS_LITERAL = "\\+";
     var QMARK_LITERAL = "\\?";
@@ -85,6 +86,7 @@ var require_constants = __commonJS({
       SEP: "\\"
     };
     var POSIX_REGEX_SOURCE = {
+      __proto__: null,
       alnum: "a-zA-Z0-9",
       alpha: "a-zA-Z",
       ascii: "\\x00-\\x7F",
@@ -101,6 +103,7 @@ var require_constants = __commonJS({
       xdigit: "A-Fa-f0-9"
     };
     module2.exports = {
+      DEFAULT_MAX_EXTGLOB_RECURSION,
       MAX_LENGTH: 1024 * 64,
       POSIX_REGEX_SOURCE,
       // regular expressions
@@ -651,6 +654,230 @@ var require_parse = __commonJS({
     var syntaxError = (type, char) => {
       return `Missing ${type}: "${char}" - use "\\\\${char}" to match literal characters`;
     };
+    var splitTopLevel = (input) => {
+      const parts = [];
+      let bracket = 0;
+      let paren = 0;
+      let quote = 0;
+      let value = "";
+      let escaped2 = false;
+      for (const ch of input) {
+        if (escaped2 === true) {
+          value += ch;
+          escaped2 = false;
+          continue;
+        }
+        if (ch === "\\") {
+          value += ch;
+          escaped2 = true;
+          continue;
+        }
+        if (ch === '"') {
+          quote = quote === 1 ? 0 : 1;
+          value += ch;
+          continue;
+        }
+        if (quote === 0) {
+          if (ch === "[") {
+            bracket++;
+          } else if (ch === "]" && bracket > 0) {
+            bracket--;
+          } else if (bracket === 0) {
+            if (ch === "(") {
+              paren++;
+            } else if (ch === ")" && paren > 0) {
+              paren--;
+            } else if (ch === "|" && paren === 0) {
+              parts.push(value);
+              value = "";
+              continue;
+            }
+          }
+        }
+        value += ch;
+      }
+      parts.push(value);
+      return parts;
+    };
+    var isPlainBranch = (branch) => {
+      let escaped2 = false;
+      for (const ch of branch) {
+        if (escaped2 === true) {
+          escaped2 = false;
+          continue;
+        }
+        if (ch === "\\") {
+          escaped2 = true;
+          continue;
+        }
+        if (/[?*+@!()[\]{}]/.test(ch)) {
+          return false;
+        }
+      }
+      return true;
+    };
+    var normalizeSimpleBranch = (branch) => {
+      let value = branch.trim();
+      let changed = true;
+      while (changed === true) {
+        changed = false;
+        if (/^@\([^\\()[\]{}|]+\)$/.test(value)) {
+          value = value.slice(2, -1);
+          changed = true;
+        }
+      }
+      if (!isPlainBranch(value)) {
+        return;
+      }
+      return value.replace(/\\(.)/g, "$1");
+    };
+    var hasRepeatedCharPrefixOverlap = (branches) => {
+      const values = branches.map(normalizeSimpleBranch).filter(Boolean);
+      for (let i = 0; i < values.length; i++) {
+        for (let j = i + 1; j < values.length; j++) {
+          const a = values[i];
+          const b = values[j];
+          const char = a[0];
+          if (!char || a !== char.repeat(a.length) || b !== char.repeat(b.length)) {
+            continue;
+          }
+          if (a === b || a.startsWith(b) || b.startsWith(a)) {
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+    var parseRepeatedExtglob = (pattern, requireEnd = true) => {
+      if (pattern[0] !== "+" && pattern[0] !== "*" || pattern[1] !== "(") {
+        return;
+      }
+      let bracket = 0;
+      let paren = 0;
+      let quote = 0;
+      let escaped2 = false;
+      for (let i = 1; i < pattern.length; i++) {
+        const ch = pattern[i];
+        if (escaped2 === true) {
+          escaped2 = false;
+          continue;
+        }
+        if (ch === "\\") {
+          escaped2 = true;
+          continue;
+        }
+        if (ch === '"') {
+          quote = quote === 1 ? 0 : 1;
+          continue;
+        }
+        if (quote === 1) {
+          continue;
+        }
+        if (ch === "[") {
+          bracket++;
+          continue;
+        }
+        if (ch === "]" && bracket > 0) {
+          bracket--;
+          continue;
+        }
+        if (bracket > 0) {
+          continue;
+        }
+        if (ch === "(") {
+          paren++;
+          continue;
+        }
+        if (ch === ")") {
+          paren--;
+          if (paren === 0) {
+            if (requireEnd === true && i !== pattern.length - 1) {
+              return;
+            }
+            return {
+              type: pattern[0],
+              body: pattern.slice(2, i),
+              end: i
+            };
+          }
+        }
+      }
+    };
+    var buildCharClassStar = (chars) => {
+      const source = chars.length === 1 ? utils.escapeRegex(chars[0]) : `[${chars.map((ch) => utils.escapeRegex(ch)).join("")}]`;
+      return `${source}*`;
+    };
+    var getStarExtglobSequenceChars = (pattern) => {
+      let index = 0;
+      const chars = [];
+      while (index < pattern.length) {
+        const match = parseRepeatedExtglob(pattern.slice(index), false);
+        if (!match || match.type !== "*") {
+          return;
+        }
+        const branches = splitTopLevel(match.body).map((branch2) => branch2.trim());
+        if (branches.length !== 1) {
+          return;
+        }
+        const branch = normalizeSimpleBranch(branches[0]);
+        if (!branch || branch.length !== 1) {
+          return;
+        }
+        chars.push(branch);
+        index += match.end + 1;
+      }
+      if (chars.length < 1) {
+        return;
+      }
+      return chars;
+    };
+    var repeatedExtglobRecursion = (pattern) => {
+      let depth = 0;
+      let value = pattern.trim();
+      let match = parseRepeatedExtglob(value);
+      while (match) {
+        depth++;
+        value = match.body.trim();
+        match = parseRepeatedExtglob(value);
+      }
+      return depth;
+    };
+    var analyzeRepeatedExtglob = (body, options) => {
+      if (options.maxExtglobRecursion === false) {
+        return { risky: false };
+      }
+      const max = typeof options.maxExtglobRecursion === "number" ? options.maxExtglobRecursion : constants.DEFAULT_MAX_EXTGLOB_RECURSION;
+      const branches = splitTopLevel(body).map((branch) => branch.trim());
+      if (branches.length > 1) {
+        if (branches.some((branch) => branch === "") || branches.some((branch) => /^[*?]+$/.test(branch)) || hasRepeatedCharPrefixOverlap(branches)) {
+          return { risky: true };
+        }
+      }
+      const safeChars = [];
+      let sawStarSequence = false;
+      let combinable = true;
+      for (const branch of branches) {
+        const chars = getStarExtglobSequenceChars(branch);
+        if (chars) {
+          sawStarSequence = true;
+          safeChars.push(...chars);
+          continue;
+        }
+        const literal = normalizeSimpleBranch(branch);
+        if (literal && literal.length === 1) {
+          safeChars.push(literal);
+          continue;
+        }
+        combinable = false;
+        if (repeatedExtglobRecursion(branch) > max) {
+          return { risky: true };
+        }
+      }
+      if (sawStarSequence) {
+        return combinable ? { risky: true, safeOutput: buildCharClassStar([...new Set(safeChars)]) } : { risky: true };
+      }
+      return { risky: false };
+    };
     var parse = (input, options) => {
       if (typeof input !== "string") {
         throw new TypeError("Expected a string");
@@ -781,6 +1008,8 @@ var require_parse = __commonJS({
         token.prev = prev;
         token.parens = state.parens;
         token.output = state.output;
+        token.startIndex = state.index;
+        token.tokensIndex = tokens.length;
         const output = (opts.capture ? "(" : "") + token.open;
         increment("parens");
         push({ type, value: value2, output: state.output ? "" : ONE_CHAR });
@@ -788,6 +1017,26 @@ var require_parse = __commonJS({
         extglobs.push(token);
       };
       const extglobClose = (token) => {
+        const literal = input.slice(token.startIndex, state.index + 1);
+        const body = input.slice(token.startIndex + 2, state.index);
+        const analysis = analyzeRepeatedExtglob(body, opts);
+        if ((token.type === "plus" || token.type === "star") && analysis.risky) {
+          const safeOutput = analysis.safeOutput ? (token.output ? "" : ONE_CHAR) + (opts.capture ? `(${analysis.safeOutput})` : analysis.safeOutput) : void 0;
+          const open = tokens[token.tokensIndex];
+          open.type = "text";
+          open.value = literal;
+          open.output = safeOutput || utils.escapeRegex(literal);
+          for (let i = token.tokensIndex + 1; i < tokens.length; i++) {
+            tokens[i].value = "";
+            tokens[i].output = "";
+            delete tokens[i].suffix;
+          }
+          state.output = token.output + open.output;
+          state.backtrack = true;
+          push({ type: "paren", extglob: true, value, output: "" });
+          decrement("parens");
+          return;
+        }
         let output = token.close + (opts.capture ? ")" : "");
         let rest;
         if (token.type === "negate") {
@@ -989,14 +1238,14 @@ var require_parse = __commonJS({
           if (opts.literalBrackets === false || utils.hasRegexChars(prevValue)) {
             continue;
           }
-          const escaped = utils.escapeRegex(prev.value);
+          const escaped2 = utils.escapeRegex(prev.value);
           state.output = state.output.slice(0, -prev.value.length);
           if (opts.literalBrackets === true) {
-            state.output += escaped;
-            prev.value = escaped;
+            state.output += escaped2;
+            prev.value = escaped2;
             continue;
           }
-          prev.value = `(${capture}${escaped}|${prev.value})`;
+          prev.value = `(${capture}${escaped2}|${prev.value})`;
           state.output += prev.value;
           continue;
         }
@@ -1399,9 +1648,9 @@ var require_picomatch = __commonJS({
     var utils = require_utils();
     var constants = require_constants();
     var isObject = (val) => val && typeof val === "object" && !Array.isArray(val);
-    var picomatch2 = (glob, options, returnState = false) => {
+    var picomatch3 = (glob, options, returnState = false) => {
       if (Array.isArray(glob)) {
-        const fns = glob.map((input) => picomatch2(input, options, returnState));
+        const fns = glob.map((input) => picomatch3(input, options, returnState));
         const arrayMatcher = (str) => {
           for (const isMatch of fns) {
             const state2 = isMatch(str);
@@ -1417,16 +1666,16 @@ var require_picomatch = __commonJS({
       }
       const opts = options || {};
       const posix = opts.windows;
-      const regex = isState ? picomatch2.compileRe(glob, options) : picomatch2.makeRe(glob, options, false, true);
+      const regex = isState ? picomatch3.compileRe(glob, options) : picomatch3.makeRe(glob, options, false, true);
       const state = regex.state;
       delete regex.state;
       let isIgnored = () => false;
       if (opts.ignore) {
         const ignoreOpts = { ...options, ignore: null, onMatch: null, onResult: null };
-        isIgnored = picomatch2(opts.ignore, ignoreOpts, returnState);
+        isIgnored = picomatch3(opts.ignore, ignoreOpts, returnState);
       }
       const matcher = (input, returnObject = false) => {
-        const { isMatch, match, output } = picomatch2.test(input, regex, options, { glob, posix });
+        const { isMatch, match, output } = picomatch3.test(input, regex, options, { glob, posix });
         const result = { glob, state, regex, posix, input, output, match, isMatch };
         if (typeof opts.onResult === "function") {
           opts.onResult(result);
@@ -1452,7 +1701,7 @@ var require_picomatch = __commonJS({
       }
       return matcher;
     };
-    picomatch2.test = (input, regex, options, { glob, posix } = {}) => {
+    picomatch3.test = (input, regex, options, { glob, posix } = {}) => {
       if (typeof input !== "string") {
         throw new TypeError("Expected input to be a string");
       }
@@ -1469,24 +1718,24 @@ var require_picomatch = __commonJS({
       }
       if (match === false || opts.capture === true) {
         if (opts.matchBase === true || opts.basename === true) {
-          match = picomatch2.matchBase(input, regex, options, posix);
+          match = picomatch3.matchBase(input, regex, options, posix);
         } else {
           match = regex.exec(output);
         }
       }
       return { isMatch: Boolean(match), match, output };
     };
-    picomatch2.matchBase = (input, glob, options) => {
-      const regex = glob instanceof RegExp ? glob : picomatch2.makeRe(glob, options);
-      return regex.test(utils.basename(input));
+    picomatch3.matchBase = (input, glob, options, posix = options && options.windows) => {
+      const regex = glob instanceof RegExp ? glob : picomatch3.makeRe(glob, options);
+      return regex.test(utils.basename(input, { windows: posix }));
     };
-    picomatch2.isMatch = (str, patterns, options) => picomatch2(patterns, options)(str);
-    picomatch2.parse = (pattern, options) => {
-      if (Array.isArray(pattern)) return pattern.map((p) => picomatch2.parse(p, options));
+    picomatch3.isMatch = (str, patterns, options) => picomatch3(patterns, options)(str);
+    picomatch3.parse = (pattern, options) => {
+      if (Array.isArray(pattern)) return pattern.map((p) => picomatch3.parse(p, options));
       return parse(pattern, { ...options, fastpaths: false });
     };
-    picomatch2.scan = (input, options) => scan(input, options);
-    picomatch2.compileRe = (state, options, returnOutput = false, returnState = false) => {
+    picomatch3.scan = (input, options) => scan(input, options);
+    picomatch3.compileRe = (state, options, returnOutput = false, returnState = false) => {
       if (returnOutput === true) {
         return state.output;
       }
@@ -1497,13 +1746,13 @@ var require_picomatch = __commonJS({
       if (state && state.negated === true) {
         source = `^(?!${source}).*$`;
       }
-      const regex = picomatch2.toRegex(source, options);
+      const regex = picomatch3.toRegex(source, options);
       if (returnState === true) {
         regex.state = state;
       }
       return regex;
     };
-    picomatch2.makeRe = (input, options = {}, returnOutput = false, returnState = false) => {
+    picomatch3.makeRe = (input, options = {}, returnOutput = false, returnState = false) => {
       if (!input || typeof input !== "string") {
         throw new TypeError("Expected a non-empty string");
       }
@@ -1514,9 +1763,9 @@ var require_picomatch = __commonJS({
       if (!parsed.output) {
         parsed = parse(input, options);
       }
-      return picomatch2.compileRe(parsed, options, returnOutput, returnState);
+      return picomatch3.compileRe(parsed, options, returnOutput, returnState);
     };
-    picomatch2.toRegex = (source, options) => {
+    picomatch3.toRegex = (source, options) => {
       try {
         const opts = options || {};
         return new RegExp(source, opts.flags || (opts.nocase ? "i" : ""));
@@ -1525,8 +1774,8 @@ var require_picomatch = __commonJS({
         return /$^/;
       }
     };
-    picomatch2.constants = constants;
-    module2.exports = picomatch2;
+    picomatch3.constants = constants;
+    module2.exports = picomatch3;
   }
 });
 
@@ -1536,37 +1785,213 @@ var require_picomatch2 = __commonJS({
     "use strict";
     var pico = require_picomatch();
     var utils = require_utils();
-    function picomatch2(glob, options, returnState = false) {
+    function picomatch3(glob, options, returnState = false) {
       if (options && (options.windows === null || options.windows === void 0)) {
         options = { ...options, windows: utils.isWindows() };
       }
       return pico(glob, options, returnState);
     }
-    Object.assign(picomatch2, pico);
-    module2.exports = picomatch2;
+    Object.assign(picomatch3, pico);
+    module2.exports = picomatch3;
   }
 });
 
 // src/plugin/hook.ts
-var import_node_child_process = require("node:child_process");
-var import_node_fs = require("node:fs");
+var import_node_fs2 = require("node:fs");
+var import_node_os = require("node:os");
 var import_node_path2 = __toESM(require("node:path"), 1);
 
 // src/fs/hook-files.ts
 var HOOK_SURFACE_FILE = "active_surface.json";
 var HOOK_STAGE_FILE = "stage.json";
+var SPAWN_TOOLS = ["Task", "Agent", "TaskCreate"];
+function claimBreakable(info, isAlive, thisHost) {
+  if (info.host !== void 0 && info.host !== thisHost) return false;
+  return !isAlive(info.pid);
+}
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
+}
 
 // src/sessions/guard.ts
 var import_node_path = __toESM(require("node:path"), 1);
+var import_node_fs = require("node:fs");
+var import_picomatch2 = __toESM(require_picomatch2(), 1);
+
+// src/schemas/glob-hazard.ts
 var import_picomatch = __toESM(require_picomatch2(), 1);
-function matchAny(rel, patterns) {
+function globHazard(glob) {
+  const known = verdicts.get(glob);
+  if (known !== void 0) return known;
+  const verdict = judged(glob);
+  verdicts.set(glob, verdict);
+  return verdict;
+}
+var verdicts = /* @__PURE__ */ new Map();
+function judged(glob) {
+  const forms = /* @__PURE__ */ new Set([glob, ...glob.split("/").filter((s) => s !== "" && s !== ".")]);
+  for (const form of forms) {
+    const hazard = formHazard(form);
+    if (hazard === null) continue;
+    const subject = form === glob ? `\`${glob}\`` : `\`${glob}\` has a segment, \`${form}\`, as a surface's package reach splits it, that`;
+    return `${subject} ${hazard} (SEC-3\u2033)`;
+  }
+  return null;
+}
+function formHazard(form) {
+  let source;
+  try {
+    source = import_picomatch.default.makeRe(form, { dot: true, debug: true }).source;
+  } catch (err) {
+    return `cannot be compiled by picomatch (${err.message}), which then matches nothing: write it so that it compiles`;
+  }
+  const spelled = literalExtglob(form);
+  if (spelled !== null) {
+    return spelled === form ? "is read by picomatch as its own spelling, not as an extglob, so it matches only a name spelled that way: write it without the repeated extglob" : `holds \`${spelled}\`, which picomatch reads as its own spelling, not as an extglob, so that part matches only a name spelled that way: write it without that repeated extglob`;
+  }
+  const group = repeatedGroup(source);
+  if (group !== null) {
+    return `makes picomatch repeat \`${group}\`, a group that is not a single character, so rejecting a path means trying every way to split it among the repeats, a number that grows exponentially with the path's length: write alternatives as braces (\`{a,b}\`) or globs of their own, and repeat single characters only`;
+  }
+  return null;
+}
+function literalExtglob(form) {
+  const token = import_picomatch.default.parse(form).tokens.find((t) => t.type === "text" && /^[*+]\(/u.test(t.value) && String(t.output) === escaped(t.value));
+  return token?.value ?? null;
+}
+var escaped = (text) => text.replace(/[-*+?.^${}(|)[\]]/gu, "\\$&");
+function repeatedGroup(source) {
+  return alternatives(source, 0).hazard;
+}
+function alternatives(src, at) {
+  let i = at;
+  let branches = 1;
+  let width = "none";
+  let hazard = null;
+  while (i < src.length && src[i] !== ")") {
+    if (src[i] === "|") {
+      branches += 1;
+      i += 1;
+      continue;
+    }
+    const piece = atom(src, i);
+    hazard ??= piece.hazard;
+    const q = quantifier(src, piece.end);
+    if (q !== null && q.many && piece.group && piece.width !== "one") hazard ??= src.slice(i, piece.end + q.length);
+    width = joined(width, q === null || piece.width === "none" ? piece.width : "more");
+    i = piece.end + (q?.length ?? 0);
+  }
+  return { end: i, width: branches > 1 ? "more" : width, hazard };
+}
+var joined = (a, b) => a === "none" ? b : b === "none" ? a : "more";
+function atom(src, at) {
+  const c = src[at];
+  if (c === "(") {
+    const head = /^\((?:\?(?:[:=!]|<[=!]|<[A-Za-z_$][\w$]*>))?/u.exec(src.slice(at))?.[0] ?? "(";
+    const inner = alternatives(src, at + head.length);
+    const around = /^\(\?<?[=!]/u.test(head);
+    return { end: src[inner.end] === ")" ? inner.end + 1 : inner.end, width: around ? "none" : inner.width, group: !around, hazard: inner.hazard };
+  }
+  if (c === "[") {
+    let j = at + 1;
+    if (src[j] === "^") j += 1;
+    while (j < src.length && src[j] !== "]") j += src[j] === "\\" ? 2 : 1;
+    return { end: j + 1, width: "one", group: false, hazard: null };
+  }
+  if (c === "\\") {
+    const next = src[at + 1] ?? "";
+    return { end: at + 2, width: next === "b" || next === "B" ? "none" : /[1-9]/u.test(next) ? "more" : "one", group: false, hazard: null };
+  }
+  return { end: at + 1, width: c === "^" || c === "$" ? "none" : "one", group: false, hazard: null };
+}
+function quantifier(src, at) {
+  const q = /^(?:([*+?])|\{(\d+)(?:(,)(\d*))?\})\??/u.exec(src.slice(at));
+  if (q === null) return null;
+  const [text, symbol, low, comma, high] = q;
+  const many = symbol !== void 0 ? symbol !== "?" : comma === void 0 ? Number(low) > 1 : high === "" || Number(high) > 1;
+  return { length: text.length, many };
+}
+
+// src/sessions/git-rm.ts
+var KNOWN_OPTIONS = /* @__PURE__ */ new Set(["-f", "--force", "-q", "--quiet", "--cached"]);
+var PLAIN_TOKEN = /^[A-Za-z0-9._/@+,=-]+$/;
+var GIT_RM_COMMAND = /(^|[;&|({`\r\n])\s*git\s+rm(\s|$)/;
+function commandOf(toolInput) {
+  if (typeof toolInput !== "object" || toolInput === null) return "";
+  const command = toolInput["command"];
+  return typeof command === "string" ? command : "";
+}
+function readGitRm(command) {
+  if (!GIT_RM_COMMAND.test(command)) return null;
+  const tokens = command.trim().split(/[ \t]+/);
+  if (tokens[0] !== "git" || tokens[1] !== "rm") {
+    return { ok: false, detail: "`git rm` must be the whole command, not one part of a compound one" };
+  }
+  const paths = [];
+  let optionsDone = false;
+  for (const token of tokens.slice(2)) {
+    if (!PLAIN_TOKEN.test(token)) return { ok: false, detail: `${JSON.stringify(token)} is not a plain path or a known option` };
+    if (!optionsDone && token === "--") {
+      optionsDone = true;
+      continue;
+    }
+    if (!optionsDone && token.startsWith("-")) {
+      if (!KNOWN_OPTIONS.has(token)) return { ok: false, detail: `option \`${token}\` is not read` };
+      continue;
+    }
+    paths.push(token);
+  }
+  if (paths.length === 0) return { ok: false, detail: "no pathspec" };
+  return { ok: true, paths };
+}
+
+// src/schemas/roles.ts
+var ROLE_IDS = [
+  "planner",
+  "diagnose",
+  "implement",
+  "blind_fix",
+  "informed_fix",
+  "review_fix",
+  "research",
+  "review",
+  "audit",
+  "spec_write",
+  "spec_review",
+  "plan_review"
+];
+var PLANNER_PROMPTS = { SLICE: "slice", PLAN: "plan" };
+var PROMPT_IDS = [
+  ...Object.values(PLANNER_PROMPTS),
+  ...ROLE_IDS.filter((r) => r !== "planner")
+];
+var ROLE_TASKS = {
+  audit: ["survey", "triage", "verify_claims"],
+  spec_write: ["decide", "write", "fix"],
+  spec_review: ["review", "verify"]
+};
+function taskKey(role, task) {
+  return `${role}/${task}`;
+}
+var TASK_KEYS = Object.entries(ROLE_TASKS).flatMap(([role, tasks]) => (tasks ?? []).map((task) => taskKey(role, task)));
+
+// src/sessions/guard.ts
+var asciiFold = (s) => s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+function matchAny(rel, patterns, opts = {}) {
+  const nocase = opts.nocase === true;
   const clean = rel.replace(/^\.\//, "");
+  const folded = nocase ? asciiFold(clean) : clean;
   for (const raw of patterns) {
     const p = String(raw).replace(/^\.\//, "");
     const bare = p.replace(/\/\*\*$/, "").replace(/\/$/, "");
-    if (clean === bare) return true;
-    if (import_picomatch.default.isMatch(clean, p, { dot: true })) return true;
-    if (import_picomatch.default.isMatch(clean, `${bare}/**`, { dot: true })) return true;
+    if (folded === (nocase ? asciiFold(bare) : bare)) return true;
+    if (import_picomatch2.default.isMatch(clean, p, { dot: true, nocase })) return true;
+    if (import_picomatch2.default.isMatch(clean, `${bare}/**`, { dot: true, nocase })) return true;
   }
   return false;
 }
@@ -1577,50 +2002,195 @@ function pathOf(toolInput) {
   return typeof candidate === "string" && candidate !== "" ? candidate : null;
 }
 var MUTATING_TOOLS = /* @__PURE__ */ new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
-function guardToolUse(toolName, toolInput, policy) {
-  const target = pathOf(toolInput);
-  if (target === null) return { decision: "allow", reason: "no path in tool input" };
-  const rel = import_node_path.default.relative(import_node_path.default.resolve(policy.workRoot), import_node_path.default.resolve(policy.workRoot, target));
-  if (rel.startsWith("..") || import_node_path.default.isAbsolute(rel)) {
-    return { decision: "deny", reason: `DENY: ${target} is outside the worktree.` };
+function artifactRelative(artifactRoot, resolveReal, absolute) {
+  try {
+    const rel = import_node_path.default.relative(resolveReal(artifactRoot), resolveReal(absolute));
+    return rel.startsWith("..") || import_node_path.default.isAbsolute(rel) ? null : rel;
+  } catch {
+    return null;
   }
-  if (!MUTATING_TOOLS.has(toolName)) {
-    return { decision: "allow", reason: `${rel} read inside the worktree (S-2\u2033)` };
+}
+function realpathNearest(target, maxHops = 40) {
+  const absolute = import_node_path.default.resolve(target);
+  const trailing = [];
+  const below = (base) => trailing.length === 0 ? base : import_node_path.default.join(base, ...[...trailing].reverse());
+  let current = absolute;
+  let hops = 0;
+  for (; ; ) {
+    try {
+      return below(import_node_fs.realpathSync.native(current));
+    } catch {
+    }
+    let link = null;
+    try {
+      link = (0, import_node_fs.readlinkSync)(current);
+    } catch {
+      link = null;
+    }
+    if (link !== null) {
+      if (hops >= maxHops) return below(current);
+      hops += 1;
+      current = import_node_path.default.resolve(import_node_path.default.dirname(current), link);
+      continue;
+    }
+    const parent = import_node_path.default.dirname(current);
+    if (parent === current) return absolute;
+    trailing.push(import_node_path.default.basename(current));
+    current = parent;
   }
-  if (matchAny(rel, policy.protectedGlobs)) {
+}
+var within = (dir, p) => {
+  const rel = import_node_path.default.relative(dir, p);
+  return rel === "" || !rel.startsWith("..") && !import_node_path.default.isAbsolute(rel);
+};
+function globDescends(pattern, below) {
+  const segments = pattern.split("/").filter((s) => s !== "" && s !== ".");
+  const dirs = below.split("/");
+  for (const [i, dir] of dirs.entries()) {
+    const segment = segments[i];
+    if (segment === void 0) return false;
+    if (segment.includes("**")) return true;
+    if (!import_picomatch2.default.isMatch(dir, segment, { dot: true })) return false;
+  }
+  return segments.length > dirs.length;
+}
+function unreadableReached(toolName, toolInput, policy, resolveReal) {
+  const dirs = policy.unreadable ?? [];
+  if (dirs.length === 0) return null;
+  const search = toolName === "Grep" || toolName === "Glob";
+  const target = pathOf(toolInput) ?? (search ? "." : null);
+  if (target === null) return null;
+  const pattern = toolName === "Glob" ? String(toolInput.pattern ?? "") : "";
+  const base = toolName === "Glob" ? import_picomatch2.default.scan(pattern).base : "";
+  const resolved = (p) => {
+    try {
+      return resolveReal(p);
+    } catch {
+      return p;
+    }
+  };
+  const at = import_node_path.default.resolve(policy.workRoot, target, base);
+  const real = resolved(at);
+  for (const dir of dirs.map((d) => import_node_path.default.resolve(d))) {
+    const shown = `${import_node_path.default.relative(policy.workRoot, dir).split(import_node_path.default.sep).join("/")}/`;
+    const pairs = [[dir, at], [resolved(dir), real]];
+    if (pairs.some(([d, p]) => within(d, p)) || within(dir, real)) return shown;
+    const above = pairs.find(([d, p]) => within(p, d));
+    if (!search || above === void 0) continue;
+    if (toolName === "Grep") return shown;
+    const glob = base === "" ? pattern : pattern.slice(base.length).replace(/^\/+/u, "");
+    if (globDescends(glob, import_node_path.default.relative(above[1], above[0]).split(import_node_path.default.sep).join("/"))) return shown;
+  }
+  return null;
+}
+function policyHazard(policy) {
+  for (const glob of [...policy.protectedGlobs, ...policy.surface]) {
+    const hazard = globHazard(glob);
+    if (hazard !== null) return hazard;
+  }
+  return null;
+}
+function searchHazard(toolName, toolInput, policy) {
+  if (toolName !== "Glob" || (policy.unreadable ?? []).length === 0) return null;
+  const pattern = typeof toolInput === "object" && toolInput !== null ? toolInput.pattern : void 0;
+  return typeof pattern === "string" && pattern !== "" ? globHazard(pattern) : null;
+}
+function guardToolUse(toolName, toolInput, policy, resolveReal = realpathNearest) {
+  if (SPAWN_TOOLS.includes(toolName)) {
     return {
       decision: "deny",
-      reason: `DENY: ${rel} is protected (protected globs and ticket criteria are immutable to sessions \u2014 SEC-3).`
+      reason: `DENY: ${toolName} would spawn a billable session outside the ledger \u2014 a session does its own work, and a billable session exists only through the metered path (D-28).`
+    };
+  }
+  const unmatchable = searchHazard(toolName, toolInput, policy);
+  if (unmatchable !== null) {
+    return {
+      decision: "deny",
+      reason: `DENY: this Glob call's pattern cannot be matched safely: ${unmatchable}. The guard matches a Glob pattern against the way to each directory this session may not read (C-4\u2075), so it refuses one it cannot match safely: name the directories you need instead.`
+    };
+  }
+  const barred = unreadableReached(toolName, toolInput, policy, resolveReal);
+  if (barred !== null) {
+    return {
+      decision: "deny",
+      reason: `DENY: this call reaches ${barred}, which this session may not read: it holds the originals the pack was written from, and planning reads the pack. Read or search the directories you need instead, naming them in the call.`
+    };
+  }
+  if (toolName === "Bash") {
+    const reading = readGitRm(commandOf(toolInput));
+    if (reading !== null) return judgeGitRm(reading, policy, resolveReal);
+  }
+  const target = pathOf(toolInput);
+  if (target === null) return { decision: "abstain", reason: "no path in tool input \u2014 the allowlist decides" };
+  const root = import_node_path.default.resolve(policy.workRoot);
+  const absolute = import_node_path.default.resolve(root, target);
+  if (policy.artifactRoot !== void 0) {
+    const artifactRoot = import_node_path.default.resolve(policy.artifactRoot);
+    const lexical = import_node_path.default.relative(artifactRoot, absolute);
+    if (!lexical.startsWith("..") && !import_node_path.default.isAbsolute(lexical)) {
+      const real = artifactRelative(artifactRoot, resolveReal, absolute);
+      if (real === null) {
+        return { decision: "deny", reason: `DENY: ${target} resolves through a symbolic link out of this session's artifact area.` };
+      }
+      return MUTATING_TOOLS.has(toolName) ? { decision: "allow", reason: `${real} is this session's own artifact area (B-2\u2033)` } : { decision: "abstain", reason: `${real} is this session's artifact area; the allowlist decides (S-2\u2033)` };
+    }
+  }
+  const typed = import_node_path.default.relative(root, absolute);
+  if (typed.startsWith("..") || import_node_path.default.isAbsolute(typed)) {
+    return { decision: "deny", reason: `DENY: ${target} is outside the worktree.` };
+  }
+  let rel;
+  try {
+    rel = import_node_path.default.relative(resolveReal(root), resolveReal(absolute));
+  } catch (err) {
+    return {
+      decision: "deny",
+      reason: `DENY: ${typed} could not be resolved to a real path (${err.message}) \u2014 containment cannot be established.`
+    };
+  }
+  if (rel.startsWith("..") || import_node_path.default.isAbsolute(rel)) {
+    return { decision: "deny", reason: `DENY: ${typed} resolves through a symbolic link to a path outside the worktree.` };
+  }
+  if (!MUTATING_TOOLS.has(toolName)) {
+    return { decision: "abstain", reason: `${rel} is inside the worktree; the allowlist decides (S-2\u2033)` };
+  }
+  const unsafe = policyHazard(policy);
+  if (unsafe !== null) {
+    return {
+      decision: "deny",
+      reason: `DENY: this session's policy cannot be honoured: ${unsafe}. No write into the worktree is allowed under a policy the guard cannot match safely and as written, until the plan or config that supplied it is fixed (P5).`
+    };
+  }
+  const via = rel === typed ? "" : ` (reached through a symbolic link from ${typed})`;
+  if (matchAny(rel, policy.protectedGlobs, { nocase: true })) {
+    return {
+      decision: "deny",
+      reason: `DENY: ${rel} is protected${via} (protected globs and ticket criteria are immutable to sessions \u2014 SEC-3).`
     };
   }
   if (!matchAny(rel, policy.surface)) {
     return {
       decision: "deny",
-      reason: `DENY: ${rel} is outside this ticket's declared surface. If genuinely required, request a surface expansion with a one-line justification by writing surface_request.json at the path given in your inputs (SEC-3).`
+      reason: `DENY: ${rel} is outside this ticket's declared surface${via}. If genuinely required, request a surface expansion with a one-line justification by writing surface_request.json at the path given in your inputs (SEC-3).`
     };
   }
   return { decision: "allow", reason: `${rel} is inside the declared surface` };
 }
-var READ_ONLY_STAGES = /* @__PURE__ */ new Set(["planner", "diagnose", "research", "review"]);
-async function stopGate(input, runScopedGate2) {
-  if (input.stopHookActive) {
-    return { decision: "allow", reason: "stop-hook continuation already active; the kernel judges from here" };
+function judgeGitRm(reading, policy, resolveReal) {
+  if (!reading.ok) {
+    return {
+      decision: "deny",
+      reason: `DENY: a \`git rm\` the guard cannot read is refused \u2014 ${reading.detail}. One simple command, plain paths one per token; the options read are -f, -q, --cached and -- (no -r, no globs, no shell syntax) (S-3\u2075).`
+    };
   }
-  if (input.gateCmd === null || input.gateCmd.trim() === "" || READ_ONLY_STAGES.has(input.stage)) {
-    return { decision: "allow", reason: "no stop gate for this stage" };
+  for (const target of reading.paths) {
+    const verdict = guardToolUse("Write", { file_path: target }, policy, resolveReal);
+    if (verdict.decision !== "allow") return { decision: "deny", reason: verdict.reason };
   }
-  const result = await runScopedGate2(input.gateCmd);
-  if (result.green) return { decision: "allow", reason: "scoped gate green" };
-  return {
-    decision: "block",
-    reason: `GATE RED \u2014 the stage cannot end while verification fails.
-$ ${input.gateCmd}
-${result.outputTail.slice(-1500)}`
-  };
+  return { decision: "allow", reason: `git rm ${reading.paths.join(" ")}: every path is inside the declared surface (S-3\u2075)` };
 }
 
 // src/plugin/hook.ts
-var GATE_TIMEOUT_MS = 9e5;
 function payloadCwd(payload) {
   return typeof payload.cwd === "string" && payload.cwd !== "" ? payload.cwd : process.cwd();
 }
@@ -1637,27 +2207,39 @@ function denyJson(reason) {
   });
 }
 function expired(doc, nowMs) {
-  return typeof doc?.expires_at_ms === "number" && nowMs > doc.expires_at_ms;
+  return typeof doc?.expires_at_ms !== "number" || nowMs > doc.expires_at_ms;
 }
-function commandOf(toolInput) {
+var POLICY_MAX_BYTES = 256 * 1024;
+function readPolicyFile(file) {
+  try {
+    const st = (0, import_node_fs2.statSync)(file);
+    if (!st.isFile() || st.size > POLICY_MAX_BYTES) return null;
+    return (0, import_node_fs2.readFileSync)(file, "utf8");
+  } catch {
+    return null;
+  }
+}
+function commandOf2(toolInput) {
   if (typeof toolInput !== "object" || toolInput === null) return "";
   const command = toolInput["command"];
   return typeof command === "string" ? command : "";
 }
+var REFEED_TEXT = "Detent run in flight: tickets are still claimable or claimed. Continue the loop \u2014 call the referee's `next` tool and proceed with the next legal move; end the session only when the pool is empty and the outcome has been presented. (This gate fires once; the referee re-verifies everything regardless \u2014 P2.)";
 function decidePreToolUse(payload, nowMs) {
   const cwd = payloadCwd(payload);
-  let raw;
-  try {
-    raw = (0, import_node_fs.readFileSync)(import_node_path2.default.join(cwd, ".detent", HOOK_SURFACE_FILE), "utf8");
-  } catch {
-    return null;
-  }
+  const raw = readPolicyFile(import_node_path2.default.join(cwd, ".detent", HOOK_SURFACE_FILE));
+  if (raw === null) return null;
   let cfg;
   try {
     cfg = JSON.parse(raw);
   } catch {
     return denyJson(
       `DENY: ${import_node_path2.default.join(".detent", HOOK_SURFACE_FILE)} exists but is unreadable \u2014 a declared surface that cannot be honored fails closed (P5).`
+    );
+  }
+  if (typeof cfg !== "object" || cfg === null) {
+    return denyJson(
+      `DENY: ${import_node_path2.default.join(".detent", HOOK_SURFACE_FILE)} exists but declares no surface \u2014 a policy that cannot be honored fails closed (P5).`
     );
   }
   if (expired(cfg, nowMs)) return null;
@@ -1668,7 +2250,7 @@ function decidePreToolUse(payload, nowMs) {
     );
   }
   if (tool === "Bash") {
-    const command = commandOf(payload.tool_input);
+    const command = commandOf2(payload.tool_input);
     const hit = strings(cfg?.deny_bash_containing).find((entry) => entry !== "" && command.includes(entry));
     if (hit !== void 0) {
       return denyJson(
@@ -1676,51 +2258,60 @@ function decidePreToolUse(payload, nowMs) {
       );
     }
   }
-  if (cfg?.driver === true) {
-    if (pathOf(payload.tool_input) === null) return null;
-    return denyJson(
-      "DENY: the driver sequences, never edits (D-27). A Detent claim is active; every change happens through referee-admitted sessions, and state flows through referee tools alone."
-    );
+  const DRIVER_DENIED_TOOLS = /* @__PURE__ */ new Set([
+    "Bash",
+    "BashOutput",
+    "KillShell",
+    "KillBash",
+    /* D-28″ (PRDR-215): the spawn names are the guard's one list, not a second copy. */
+    ...SPAWN_TOOLS,
+    "WebFetch"
+  ]);
+  function driverDecision(tool2, toolInput) {
+    const reason = "DENY: the driver sequences, never edits (D-27). A Detent claim is active; every change happens through referee-admitted sessions, and state flows through referee tools alone.";
+    if (DRIVER_DENIED_TOOLS.has(tool2)) {
+      return denyJson(
+        `${reason} \`${tool2}\` runs commands, which is neither: a shell can write a file, run a gate outside the referee's classification, or start a billable session off the ledger.`
+      );
+    }
+    if (pathOf(toolInput) === null) return null;
+    return denyJson(reason);
   }
+  if (cfg?.driver === true) return driverDecision(tool, payload.tool_input);
   const decision = guardToolUse(tool, payload.tool_input, {
     surface: strings(cfg?.surface),
     protectedGlobs: strings(cfg?.protected),
     workRoot: cwd
   });
-  return decision.decision === "allow" ? null : denyJson(decision.reason);
+  return decision.decision === "deny" ? denyJson(decision.reason) : null;
 }
-function runScopedGate(command, cwd) {
-  const result = (0, import_node_child_process.spawnSync)(command, {
-    shell: true,
-    cwd,
-    encoding: "utf8",
-    timeout: GATE_TIMEOUT_MS,
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  const merged = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-  return { green: result.status === 0, outputTail: merged.slice(-1500) };
+function addressed(driver, payload) {
+  if (driver === null || typeof driver !== "object") return true;
+  const d = driver;
+  if (typeof d.pid !== "number") return true;
+  const sessionId = typeof d.session_id === "string" ? d.session_id : null;
+  const parents = Array.isArray(d.parents) ? d.parents.filter((p) => typeof p === "number") : [];
+  if (sessionId === null && parents.length === 0) return true;
+  if (claimBreakable({ pid: d.pid, host: typeof d.host === "string" ? d.host : void 0 }, pidAlive, (0, import_node_os.hostname)())) return true;
+  return sessionId !== null && payload.session_id === sessionId || parents.includes(process.ppid);
 }
 async function decideStop(payload, nowMs) {
   const cwd = payloadCwd(payload);
-  let stage = "";
-  let gateCmd = null;
-  let refeed = "";
+  const rawStage = readPolicyFile(import_node_path2.default.join(cwd, ".detent", HOOK_STAGE_FILE));
+  if (rawStage === null) return null;
   let parsed;
   try {
-    parsed = JSON.parse((0, import_node_fs.readFileSync)(import_node_path2.default.join(cwd, ".detent", HOOK_STAGE_FILE), "utf8"));
-    stage = typeof parsed?.stage === "string" ? parsed.stage : "";
-    gateCmd = typeof parsed?.gate_cmd === "string" ? parsed.gate_cmd : null;
-    refeed = typeof parsed?.run_refeed === "string" ? parsed.run_refeed : "";
+    parsed = JSON.parse(rawStage);
   } catch {
     return null;
   }
   if (expired(parsed, nowMs)) return null;
+  const refeed = typeof parsed?.run_refeed === "string" && parsed.run_refeed !== "" ? REFEED_TEXT : "";
   const stopHookActive = Boolean(payload.stop_hook_active);
-  if (refeed !== "" && !stopHookActive) {
+  if (refeed !== "" && !stopHookActive && addressed(parsed?.driver, payload)) {
     return JSON.stringify({ decision: "block", reason: refeed });
   }
-  const decision = await stopGate({ stage, gateCmd, stopHookActive }, async (command) => runScopedGate(command, cwd));
-  return decision.decision === "allow" ? null : JSON.stringify({ decision: "block", reason: decision.reason });
+  return null;
 }
 async function handleHookInput(raw, nowMs = Date.now()) {
   let payload;

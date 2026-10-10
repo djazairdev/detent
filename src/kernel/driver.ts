@@ -5,6 +5,10 @@ import { readTicket } from "./tickets/readers.js";
 import type { LoadedConfig } from "./worstcase.js";
 import type { RunOptions, RunOutcome } from "./run.js";
 import { EXIT_HUMAN_GATED, EXIT_NOT_READY, EXIT_OK } from "./run.js";
+import { SCHEMA_VERSION } from "../schemas/common.js";
+import type { AmendmentRecord } from "../schemas/amendment.js";
+import { describeAmendment, holdReason, openAmendmentOf, readAmendments } from "./amendment-store.js";
+import { MAX_RESET_WAIT_MS, OUTAGE_BACKOFF_MS, outageWait } from "../schemas/backend-limit.js";
 
 /**
  * T-106 — the headless driver's loop (C-9, C-10, C-13, D-27).
@@ -16,16 +20,37 @@ import { EXIT_HUMAN_GATED, EXIT_NOT_READY, EXIT_OK } from "./run.js";
  * (`run`/`runWithConfig`) lives in `run.ts`; the types flow from there.
  */
 
-/** The two structured-error routes a driver handles; everything else is a defect. */
+/** The structured-error routes a driver handles; everything else is a defect. */
 class DriverBreach extends Error {}
 class DriverDriftHalt extends Error {}
+/** PRDR-112: a backend refusal or outage — back off and retry before giving up. */
+class DriverRefusal extends Error {}
+/**
+ * B-2′ (PRDR-244): integration failed after the ticket was finalized — a
+ * worktree merge conflict is the case that exists.
+ *
+ * Its own route because PRDR-151 borrowed `DriverRefusal`, which means one
+ * specific thing: PRDR-112's outage, whose whole purpose is to WAIT and RETRY.
+ * A conflict is not transient and no retry resolves it, so it slept the full
+ * backoff, continued, found the pool empty because the ticket is DONE, and
+ * `finish()` reports `pending` from NEEDS_HUMAN and BLOCKED only — exit 0 with
+ * the work unmerged. The ticket stays DONE and the run stops; what failed is a
+ * property of the run, not of the ticket, so this carries a reason rather than
+ * an X-3 state change.
+ */
+class DriverIntegrationHalt extends Error {}
 
 const TERMINAL: readonly string[] = ["DONE", "NEEDS_HUMAN", "BLOCKED"];
 
 export class Driver {
   private readonly now: () => number;
+  private readonly sleep: (ms: number) => Promise<void>;
   private processed = 0;
   private quitting = false;
+  /** PRDR-112: consecutive outage halts without a completed ticket in between. */
+  private outages = 0;
+  /** X-4⁸ (PRDR-286): the amendments this run has offered, each once. */
+  private readonly offered = new Set<string>();
 
   constructor(
     private readonly opts: RunOptions,
@@ -33,6 +58,7 @@ export class Driver {
     private readonly core: RefereeCore,
   ) {
     this.now = opts.now ?? (() => Date.now());
+    this.sleep = opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
   /** One registry call; structured errors become the driver's two routes. */
@@ -42,6 +68,7 @@ export class Driver {
       const { code, message } = (result as RefereeToolError).error;
       if (code === "BREACH") throw new DriverBreach(message);
       if (code === "DRIFT_HALT") throw new DriverDriftHalt(message);
+      if (code === "REFUSED") throw new DriverRefusal(message);
       /*
        * ILLEGAL_TRANSITION / BAD_EVIDENCE / INVALID_INPUT / UNKNOWN_TOOL from
        * the deterministic driver are driver defects, not run outcomes.
@@ -62,7 +89,11 @@ export class Driver {
     for (;;) {
       if (this.quitting) return await this.finish();
       const { pool } = await this.tool<{ pool: { id: string; state: State }[] }>("next", {});
-      if (pool.length === 0) return await this.finish();
+      if (pool.length === 0) {
+        /* X-4⁸ (PRDR-286): an amendment no escalation offered is offered before the run ends; a rejection frees what it held. */
+        if (await this.offerOpenAmendments()) continue;
+        return await this.finish();
+      }
 
       const id = (pool[0] as { id: string }).id;
       const acquired = await this.tool<{
@@ -72,21 +103,74 @@ export class Driver {
       }>("claim", { op: "acquire", ticket_id: id });
       if (!acquired.ok) continue;
 
+      /**
+       * PRDR-190 (audit finding 2): the run's phase, for whatever ends it.
+       *
+       * The claim is the moment the run commits to a ticket, so it is what was
+       * in flight if a signal arrives. `init` reported this from its `note`
+       * seam and the loop reported nothing at all.
+       */
+      this.opts.phase?.(`ticket ${id}`);
+
+      let refused: DriverRefusal | null = null;
       try {
         await this.processTicket(id, acquired);
       } catch (err) {
+        /** B-2′ (PRDR-244): the conflict is already noted on the ticket and its message names the paths. */
+        if (err instanceof DriverIntegrationHalt) {
+          return {
+            exitCode: EXIT_HUMAN_GATED,
+            summary: { schema_version: SCHEMA_VERSION, exit: EXIT_HUMAN_GATED, pending: [], reason: err.message },
+          };
+        }
         if (err instanceof DriverDriftHalt) {
           const { reason } = await this.tool<{ reason: string }>("record", { kind: "drift_halt" });
           return {
             exitCode: EXIT_NOT_READY,
-            summary: { schema_version: 1, exit: EXIT_NOT_READY, pending: [], reason },
+            summary: { schema_version: SCHEMA_VERSION, exit: EXIT_NOT_READY, pending: [], reason },
           };
         }
-        throw err;
+        if (err instanceof DriverRefusal) refused = err;
+        else throw err;
       } finally {
         await this.tool("claim", { op: "release", ticket_id: id });
       }
+      if (refused !== null) {
+        /*
+         * PRDR-112: the referee named an outage. Exiting handed the restart to
+         * a person — eighty minutes, once. Wait, then let the pool hand the
+         * same ticket back: a session that returns real work resets the
+         * referee's streak, a crashed one re-raises this route at the next
+         * level, and after the ladder the run exits exactly as before.
+         */
+        /**
+         * X-8″ (PRDR-321): a usage limit names its reset, and the run waits for
+         * THAT, as `init` has since PRDR-189. The ladder's 21 minutes against a
+         * window that reset hours later ended the run and handed the restart to
+         * a person. The referee's message says which session a limit stopped,
+         * and the next launch of that role resumes it.
+         */
+        const wait = outageWait(refused.message, this.outages, new Date(this.now()));
+        if (wait === null) throw refused;
+        if (wait.kind === "too_long") {
+          throw new DriverRefusal(
+            `${refused.message} — it resets in ${String(Math.round(wait.ms / 60_000))} min, longer than this will wait ` +
+              `(${String(MAX_RESET_WAIT_MS / 60_000)} min). Re-run \`detent run\` when the window has reset; a session the limit stopped resumes then.`,
+          );
+        }
+        this.outages += 1;
+        const mins = Math.round(wait.ms / 60_000);
+        this.opts.announce?.(
+          wait.kind === "ladder"
+            ? `backend outage — waiting ${String(mins)} min before retrying (${String(this.outages)}/${String(OUTAGE_BACKOFF_MS.length)})`
+            : `backend limit — waiting ${String(mins)} min for the stated reset, ${wait.resets} ` +
+                `(${String(this.outages)}/${String(OUTAGE_BACKOFF_MS.length)}): ${refused.message.slice(0, 300)}`,
+        );
+        await this.sleep(wait.ms);
+        continue;
+      }
 
+      this.outages = 0;
       this.processed += 1;
       if (this.opts.maxTickets !== undefined && this.processed >= this.opts.maxTickets) return await this.finish();
     }
@@ -95,9 +179,9 @@ export class Driver {
   private async finish(): Promise<RunOutcome> {
     const { pending } = await this.tool<{ pending: PendingEntry[] }>("status", {});
     if (pending.length > 0) {
-      return { exitCode: EXIT_HUMAN_GATED, summary: { schema_version: 1, exit: EXIT_HUMAN_GATED, pending } };
+      return { exitCode: EXIT_HUMAN_GATED, summary: { schema_version: SCHEMA_VERSION, exit: EXIT_HUMAN_GATED, pending } };
     }
-    return { exitCode: EXIT_OK, summary: { schema_version: 1, exit: EXIT_OK, pending: [] } };
+    return { exitCode: EXIT_OK, summary: { schema_version: SCHEMA_VERSION, exit: EXIT_OK, pending: [] } };
   }
 
   /* ------------------------------------------------------ ticket driving */
@@ -144,25 +228,59 @@ export class Driver {
     } else if (state === "BLOCKED") {
       await this.tool("record", { kind: "close_generation", ticket_id: id, outcome: "blocked" });
     } else if (state === "DONE") {
-      await this.tool("record", { kind: "finalize", ticket_id: id });
+      /**
+       * B-2′ (PRDR-151): finalize can BREACH — a worktree merge conflict is the
+       * case that exists. It sat outside the handler above, so the breach
+       * escaped `processTicket`, `loop()` rethrew it, and the run exited 1 with
+       * the ticket already DONE, its generation left `in_flight`, and `status`
+       * showing nothing wrong. Routing it here reaches the human the same way
+       * every other breach does.
+       */
+      try {
+        await this.tool("record", { kind: "finalize", ticket_id: id });
+      } catch (err) {
+        if (!(err instanceof DriverBreach)) throw err;
+        /**
+         * B-2′ (PRDR-151): finalize can breach — a worktree merge conflict is
+         * the case that exists — and this sat OUTSIDE the handler above, so it
+         * escaped `processTicket`, `loop()` rethrew it, and the run exited 1
+         * with the generation left `in_flight` and `detent status` showing
+         * nothing wrong.
+         *
+         * The ticket stays DONE, and that is correct rather than a compromise:
+         * the work was implemented, gated and reviewed, and DONE is terminal by
+         * design (X-3 offers no edge out). What failed is INTEGRATING it. So
+         * the generation closes as done, the branch and worktree survive for a
+         * human, and the run stops with a summary naming the conflict instead
+         * of an unclassified throw.
+         *
+         * PRDR-244: that last clause was the intent and not the behaviour until
+         * `DriverIntegrationHalt` existed — this threw `DriverRefusal`, and the
+         * outage route swallowed it into an exit 0.
+         */
+        await this.tool("record", { kind: "close_generation", ticket_id: id, outcome: "done" });
+        throw new DriverIntegrationHalt(err.message);
+      }
       await this.tool("record", { kind: "close_generation", ticket_id: id, outcome: "done" });
     }
   }
 
   private async stage(id: string, state: State): Promise<State> {
     switch (state) {
-      case "IN_PROGRESS": {
-        const result = await this.tool<{ falsified_ref?: string }>("attempt", { ticket_id: id, state });
-        if (result.falsified_ref !== undefined) return await this.transition(id, result.falsified_ref);
-        return await this.gateTo(id);
-      }
+      case "IN_PROGRESS":
       case "BLIND_FIX":
       case "REVIEW_FIX":
-        await this.tool("attempt", { ticket_id: id, state });
+      case "INFORMED_FIX": {
+        const result = await this.tool<{ falsified_ref?: string; oversized_ref?: string }>("attempt", { ticket_id: id, state });
+        /*
+         * X-4 / X-4′ / X-4″, and X-3′ (PRDR-289) after a fix: a signal ref is
+         * the session's own finding; the transition it admits decides where it goes.
+         */
+        const signal = result.falsified_ref ?? result.oversized_ref;
+        if (signal !== undefined) return await this.transition(id, signal);
+        if (state === "INFORMED_FIX") return await this.gateTo(id, { escalate_reason: "informed fix failed — the ladder cannot reopen (D-13)" });
         return await this.gateTo(id);
-      case "INFORMED_FIX":
-        await this.tool("attempt", { ticket_id: id, state });
-        return await this.gateTo(id, { escalate_reason: "informed fix failed — the ladder cannot reopen (D-13)" });
+      }
       case "RESEARCH":
         return await this.stageRecord(id, "research");
       case "IN_REVIEW":
@@ -207,13 +325,17 @@ export class Driver {
    */
   private async offerEscalation(id: string, reason: string, summary: string): Promise<void> {
     if (this.opts.escalate === undefined || this.quitting) return;
+    /* X-4⁸ (PRDR-286): a ticket that filed an amendment escalates as the amendment's decision. */
+    const amendment = openAmendmentOf(this.opts.root, id);
+    if (amendment !== null) return await this.offerAmendment(amendment, reason, summary);
     const action = await this.opts.escalate({ ticket: readTicket(this.opts.root, id), reason, summary });
 
     if (action.kind === "quit") {
       this.quitting = true;
       return;
     }
-    if (action.kind === "skip") {
+    /* An amendment's decision answers only an escalation that offered one. */
+    if (action.kind === "skip" || action.kind === "amend") {
       await this.tool("record", { kind: "note", ticket_id: id, author: action.by, text: `skipped at escalation (C-10)` });
       return;
     }
@@ -237,6 +359,38 @@ export class Driver {
     });
     await this.transition(id, ref);
     await this.tool("record", { kind: "open_generation", ticket_id: id, reason: action.guidance });
+  }
+
+  /**
+   * X-4⁸ (PRDR-286): the operator decides an amendment, and no ticket moves.
+   * The filing ticket stays NEEDS_HUMAN, and what the amendment held is held
+   * or freed by the decision. Skip leaves it open and writes no note, so the
+   * pending reason still names it. A decision the referee refuses is said, and
+   * the amendment offered again.
+   */
+  private async offerAmendment(amendment: AmendmentRecord, reason: string, summary: string): Promise<void> {
+    this.offered.add(amendment.id);
+    while (this.opts.escalate !== undefined && !this.quitting) {
+      const action = await this.opts.escalate({ ticket: readTicket(this.opts.root, amendment.ticket), reason, summary, amendment });
+      if (action.kind === "quit") this.quitting = true;
+      if (action.kind !== "amend") return;
+      const result = await this.tool<{ ok: boolean; message: string }>("record", {
+        kind: "amendment",
+        amendment_id: amendment.id,
+        by: action.by,
+        decision: action.decision,
+      });
+      this.opts.announce?.(result.message);
+      if (result.ok) return;
+    }
+  }
+
+  /** Each open amendment this run has not offered — one whose ticket went back to diagnosis, or an earlier run's. True when any was. */
+  private async offerOpenAmendments(): Promise<boolean> {
+    if (this.opts.escalate === undefined || this.quitting) return false;
+    const unoffered = readAmendments(this.opts.root).filter((a) => a.status === "open" && !this.offered.has(a.id));
+    for (const a of unoffered) await this.offerAmendment(a, holdReason(a), describeAmendment(a));
+    return unoffered.length > 0;
   }
 
   private async driveOn(id: string, from: State): Promise<void> {

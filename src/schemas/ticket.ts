@@ -1,6 +1,7 @@
 import { z } from "zod";
+import { contractConsumeSchema, contractProvideSchema } from "./init.js";
 import { STATES } from "./states.js";
-import { SCHEMA_VERSION, glob, isoTimestamp, nonEmptyString } from "./common.js";
+import { SCHEMA_VERSION, glob, isoTimestamp, nonEmptyString, ticketId } from "./common.js";
 
 /**
  * A-1 Ticket, with X-8 attempt generations.
@@ -39,7 +40,7 @@ export const reviewTags = ["correctness", "requirement", "scope", "rules"] as co
 
 export const ticketSchema = z.strictObject({
   schema_version: z.literal(SCHEMA_VERSION),
-  id: nonEmptyString,
+  id: ticketId,
   type: z.enum(["feature", "bug"]),
   title: nonEmptyString,
   description: z.string(),
@@ -47,7 +48,30 @@ export const ticketSchema = z.strictObject({
   acceptance_criteria: z.array(nonEmptyString).min(1),
   non_goals: z.array(z.string()).default([]),
   surface: z.array(glob).default([]),
+  /** PRDR-227: what the kernel GRANTED (SEC-3's lever) — in `surface` too, and left out of the approved projection. */
+  granted: z.array(glob).default([]),
   blockers: z.array(nonEmptyString).default([]),
+  /**
+   * A-1‴ (PRDR-120): the interface this ticket owns, and the interfaces it
+   * leans on. Carried onto the written ticket because the implement and review
+   * sessions receive them — a consumer is handed the provider's own note.
+   */
+  provides: z.array(contractProvideSchema).default([]),
+  consumes: z.array(contractConsumeSchema).default([]),
+  /**
+   * A-1⁵ (PRDR-201): what this ticket DELIVERS, travelling with it as A-1‴'s
+   * interface does. An implement or review session that knows which requirement
+   * it serves is the traceability PB-014 asks for; the coverage check upstream
+   * is the same two lists, decided over the whole plan.
+   */
+  requirement_ids: z.array(nonEmptyString).default([]),
+  baseline_ids: z.array(nonEmptyString).default([]),
+  /**
+   * C-4⁵ (PRDR-292): the pack's criteria this ticket delivers, each carried
+   * word for word among its `acceptance_criteria`, so the run tests what the
+   * pack says. Defaulted: a ticket written before the field carries none.
+   */
+  criterion_ids: z.array(nonEmptyString).default([]),
   /**
    * X-4′ (PRDR-111): dependencies the RUN discovered — a falsification naming
    * a path another ticket's surface owns. Declared structure stays in

@@ -1,9 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { cacheKey, contradictions, fingerprint, type EnvFingerprint } from "../../adapter/env.js";
-import { stateDir } from "../../fs/layout.js";
+import { stateDir, writeArtifact } from "../../fs/layout.js";
 import { parseArtifact } from "../../schemas/common.js";
 import { researchBriefSchema, type ResearchBrief } from "../../schemas/records.js";
+import { scrubJson } from "../scrub.js";
+import type { Budgets } from "../../schemas/budgets.js";
 import { researchDry, researchValid, upstreamBug, type KernelEvent } from "../events.js";
 
 /**
@@ -28,10 +30,23 @@ export function briefCachePath(root: string, key: string): string {
 
 export interface ResearchDeps {
   readonly root: string;
-  readonly launch: (inputs: Record<string, unknown>) => Promise<void>;
+  /**
+   * X-1 (PRDR-250): returns the session's OBSERVED turn count, which the stage
+   * compares against `failure_research_tool_calls`. Turns are the proxy on
+   * init's precedent (`src/init/pipeline.ts`): S-4's telemetry carries no
+   * per-call counter, so a turn is one call's worth of budget (C-3a). A launch
+   * suppressed by B-5's crash skip reports zero, because no session ran.
+   */
+  readonly launch: (inputs: Record<string, unknown>) => Promise<number>;
   readonly readArtifact: () => unknown;
   readonly readFailureSignature: () => string | null;
-  readonly toolCallCeiling: number;
+  /**
+   * X-1 (PRDR-250): the budgets themselves, not a pre-extracted number. The
+   * P6 oracle strips comments AND string literals before matching, so a module
+   * that takes a handed-in figure cannot vouch for enforcing the ceiling it is
+   * named for — the posture PRDR-179 closed for the sibling `init` key.
+   */
+  readonly budgets: Pick<Budgets, "failure_research_tool_calls">;
   readonly note: (text: string) => void;
   /** Injectable for determinism; defaults to the real T-021 fingerprint. */
   readonly env?: () => Promise<EnvFingerprint>;
@@ -70,11 +85,32 @@ export async function researchStage(deps: ResearchDeps): Promise<ResearchOutcome
   }
 
   /* ---- live session --------------------------------------------------------- */
-  await deps.launch({
+  const ceiling = deps.budgets.failure_research_tool_calls;
+  const turns = await deps.launch({
     ...deps.ticketInputs,
-    tool_call_ceiling: deps.toolCallCeiling,
+    tool_call_ceiling: ceiling,
     cache_key: key,
   });
+
+  /**
+   * X-1 (PRDR-265): the ceiling read back and REPORTED, never enforced.
+   *
+   * PRDR-250 made an over-budget session's brief RESEARCH_DRY, on the reasoning
+   * that the tokens were already spent and the one thing still in reach was
+   * whether the result got trusted and cached. That traded a brief the repo had
+   * already paid for against a number that orders nothing, and it threw away
+   * the more useful half: a session that overran by one turn lost a sound brief,
+   * while a session that stayed inside its budget reported nothing at all.
+   *
+   * `failure_research_tool_calls` is a budget, not a sequencer — no transition
+   * depends on it — so it counts. `tool_call_ceiling` still reaches the prompt
+   * above, which is the only honest way the session learns the figure; the turn
+   * count is announced on EVERY session, so the operator sees the spend of the
+   * sessions that behaved as well as the ones that did not. What bounds the
+   * money is `run_spend_usd`'s advisory total (X-1⁵) and the breaker (T-048).
+   */
+  const overran = turns > ceiling ? " — OVER, and the rest is real spend this ceiling does not see" : "";
+  deps.note(`research used ${String(turns)} turns against a stated ceiling of ${String(ceiling)}${overran} (X-1)`);
 
   const raw = deps.readArtifact();
   const parsed = raw === null ? null : parseArtifact(researchBriefSchema, raw);
@@ -86,9 +122,22 @@ export async function researchStage(deps: ResearchDeps): Promise<ResearchOutcome
 
   const brief = parsed.value;
   if (key !== null) {
-    const file = briefCachePath(deps.root, key);
-    mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(file, `${JSON.stringify(brief, null, 2)}\n`);
+    /**
+     * SEC-4 (PRDR-252): through the F-1 seam, not a raw `writeFileSync`.
+     *
+     * `research/failures` is `tracking: "committed"`, and the brief is the
+     * research session's own prose — it reads the repository with Read, Grep
+     * and WebSearch and quotes what it finds into `root_cause.claim`,
+     * `evidence[].claim` and four other free-string fields the schema shapes
+     * but does not constrain. Written raw, an unscrubbed copy went to a path
+     * `git add -A` stages, and stayed there: the cache is keyed by environment,
+     * so every later run with the same signature serves the same bytes.
+     *
+     * `writeArtifact` scrubs, checks containment, and stamps — the F-2/F-3
+     * guarantees this call had been bypassing along with the redaction.
+     */
+    const redacted = researchBriefSchema.parse(scrubJson(brief));
+    writeArtifact(deps.root, path.posix.join("research", "failures", `${key}.json`), redacted);
   }
 
   if (brief.upstream_bug !== undefined && brief.upstream_bug !== "") {

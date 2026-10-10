@@ -28,9 +28,18 @@ export const UNIT_SLOTS = [
 export type UnitSlot = (typeof UNIT_SLOTS)[number];
 
 /**
- * Which module enforces each ceiling. Every X-1 key must appear: a ceiling with
- * no enforcer is a budget that routes nowhere, which P6 forbids. T-012's
+ * Which module is ACCOUNTABLE for each ceiling: the one that reads the key and
+ * either sequences on it or reports it. Every X-1 key must appear, and T-012's
  * coverage test asserts this map is total over CEILING_KEYS.
+ *
+ * It used to say "enforces", and that every key must have an enforcer "because
+ * a ceiling with no enforcer is a budget that routes nowhere, which P6
+ * forbids". Seven keys break that rule deliberately — `turns_per_stage`
+ * (PRDR-106), `run_spend_usd` (PRDR-191) and the five PRDR-265 converted —
+ * and the P6 oracle names every one of them in an explicit skip list rather
+ * than leaving the exemption implied. What P6 is actually worth is unchanged:
+ * a key nothing reads is a ceiling an operator can tune with no effect, and
+ * the grep still catches that whether the read halts or only counts.
  */
 export const ENFORCEMENT_SITES = {
   blind_fix_attempts: "kernel/resolver",
@@ -38,16 +47,62 @@ export const ENFORCEMENT_SITES = {
   review_fix_attempts: "kernel/machine",
   research_sessions: "kernel/resolver",
   hypotheses: "kernel/machine",
-  sessions: "kernel/run",
-  ticket_wall_clock_ms: "kernel/run",
+  sessions: "kernel/referee-session",
+  /**
+   * X-1 (PRDR-246): `kernel/ticket-clock`, not `kernel/referee-session`. The
+   * launch seam was the only caller until `evaluate` needed the same check, and
+   * naming the arm rather than the computation is what let the `gate` tool run
+   * past this ceiling while the map still read as satisfied.
+   */
+  ticket_wall_clock_ms: "kernel/ticket-clock",
+  /** X-1⁵ (PRDR-191): both are read where the launch gate stands. */
+  spend_without_progress_floor_usd: "kernel/ledger",
+  spend_without_progress_multiple: "kernel/ledger",
+  spend_without_progress_sessions: "kernel/ledger",
   /** X-1″ (PRDR-106): advisory — read by the planner as `session_budget`, enforced nowhere. */
   turns_per_stage: "init/plan-review",
+  /**
+   * X-1 (PRDR-250): `kernel/stages/research`, which reads the observed turn
+   * count back and routes RESEARCH_DRY past the ceiling. It said
+   * `kernel/referee-stage`, which only forwarded the number to a prompt — and
+   * the oracle behind this map greps the named module for the key with comments
+   * stripped, so forwarding a value satisfied it exactly as bounding one would.
+   */
   failure_research_tool_calls: "kernel/stages/research",
-  planning_research_tool_calls: "init/plan-research",
+  /**
+   * PRDR-179: `init/pipeline`, not `init/plan-research`.
+   *
+   * `plan-research.ts` was HANDED a `budget` number and only named the ceiling
+   * in a doc comment and a log message — the same posture PRDR-172 declared
+   * disqualifying for `kernel/ledger`. `pipeline.ts` was where
+   * `budgets.planning_research_tool_calls` was read and passed in, so it was
+   * the site whose drift would break enforcement. Found once the parity test
+   * stopped letting a log string vouch for code.
+   *
+   * D-10′ (PRDR-290): `init/audit`. The pipeline read it for ANALYZE's research
+   * launcher, and ANALYZE is folded into DECIDE, so no phase launches planning
+   * research, and C-3⁵ (PRDR-298) deleted the module. AUDIT reads it and
+   * counts its claim checks against it (C-2¹¹).
+   */
+  planning_research_tool_calls: "init/audit",
+  /** C-2¹⁴ (PRDR-284): the loop that counts its rounds against it, and stops there. */
+  spec_validation_rounds: "init/validate",
+  /** X-1⁸ (PRDR-324): AUDIT hands it to its claim checks; `init/validate` hands it to a round's reviews the same way. */
+  init_sessions_at_once: "init/audit",
   flake_reruns: "kernel/flake",
   gate_timeout_ms: "adapter/run",
   binding_probe_timeout_ms: "adapter/bind",
-  run_spend_usd: "kernel/ledger",
+  /**
+   * PRDR-172: `kernel/referee-context`, not `kernel/ledger`.
+   *
+   * `SpendLedger` performs the check (`spent >= this.ceiling`) but is HANDED a
+   * number and never names the ceiling — the only occurrence of
+   * `run_spend_usd` in that file is prose. `referee-context` is where
+   * `budgets.run_spend_usd` is actually read and passed in, so it is the site
+   * whose drift would break enforcement. The parity test only noticed once it
+   * stopped letting comments vouch for code.
+   */
+  run_spend_usd: "kernel/referee-context",
 } as const satisfies Record<CeilingKey, string>;
 
 export function breachTargetFor(key: CeilingKey): BreachTarget {

@@ -19,7 +19,10 @@ Arguments passed by the user: $ARGUMENTS
   present the refusal, never work around it, never retry it unchanged.
 - **You never edit, read around, or bypass (D-27/D-28).** While a claim is
   active the containment hook denies you every file write and read, every
-  `Task` spawn, and every Bash command matching a bound verification command.
+  `Task` spawn, and every `Bash` command — not only those matching a bound
+  verification command (PRDR-180). A shell can write a file with a redirect and
+  start a billable session off the ledger, and D-27 admits neither without a
+  validator or gate result in between.
   Do not fight it: sessions do the work through `attempt`; gates run through
   `gate`; state arrives through tool results.
 - **Approval first (C-9).** `run` executes only a plan a human approved via
@@ -27,13 +30,16 @@ Arguments passed by the user: $ARGUMENTS
   and route the user to `/detent:init`.
 - **Humans answer human questions (C-10).** At an escalation you present the
   dossier summary and the four choices — approve / requeue with guidance /
-  skip / quit — and wait. You never pick for the user.
+  skip / quit — and wait; an amendment to the pack has its own five (step 6).
+  You never pick for the user.
 
 ## The loop
 
 Repeat until the pool is empty or the user quits:
 
-1. Call `next`. If the pool is empty, go to **Finish**.
+1. Call `next`. If the pool is empty, go to **Finish** — unless `status`
+   lists a ticket held by an amendment not yet decided that you have not
+   offered this run: offer it as step 6 does, then call `next` again.
 2. Pick one pool entry — default to the first unless the user directed
    otherwise (R-2: any pool entry is legal; nothing else is) — and call
    `claim` with `{op: "acquire", ticket_id}`. A refusal names the blocker;
@@ -43,21 +49,24 @@ Repeat until the pool is empty or the user quits:
    implementing, fixing, researching the failure, fixing with research
    applied, addressing review findings, in review, verifying).
 4. Drive stages by the ticket's current state until it reaches a terminal
-   state (`DONE`, `NEEDS_HUMAN`, `BLOCKED`):
+   state (`DONE`, `NEEDS_HUMAN`, `BLOCKED`) or `READY`:
    - `IN_PROGRESS` — call `attempt` `{ticket_id, state}`. If the result has
-     `falsified_ref`, `transition` with it. Otherwise call `gate`
-     If that transition lands on `READY`, the referee found the path the session named in
-     another ticket's surface and re-queued this one behind it (X-4′): `release` the claim
-     and call `next`.
+     `falsified_ref` or `oversized_ref`, `transition` with it. Otherwise call `gate`
      `{ticket_id}` and `transition` with the returned `ref`.
-   - `BLIND_FIX`, `REVIEW_FIX` — `attempt`, then `gate` + `transition`.
-   - `INFORMED_FIX` — `attempt`, then `gate` with
+   - `BLIND_FIX`, `REVIEW_FIX` — `attempt`. If the result has `falsified_ref`,
+     `transition` with it (X-3′). Otherwise `gate` + `transition`.
+   - `INFORMED_FIX` — `attempt`. If the result has `falsified_ref`, `transition`
+     with it (X-3′). Otherwise `gate` with
      `{escalate_reason: "informed fix failed — the ladder cannot reopen (D-13)"}`
      and `transition`.
    - `RESEARCH` — `record` `{kind: "stage", stage: "research"}` + `transition`.
    - `IN_REVIEW` — `record` `{kind: "stage", stage: "review"}` + `transition`.
    - `DIAGNOSED` — `record` `{kind: "stage", stage: "diagnose"}` + `transition`.
    - `APPROVED` — `gate` with `{close_check: true}` + `transition`.
+
+   A `falsified_ref`'s transition that lands on `READY` means the referee found the path
+   the session named in another ticket's surface and re-queued this one behind it (X-4′):
+   `release` the claim and call `next`.
 5. Structured errors are routes, not failures:
    - `BREACH` — a budget ceiling: call `record` `{kind: "breach", reason}`
      with the message, `transition` with the ref, then handle the terminal
@@ -80,6 +89,15 @@ Repeat until the pool is empty or the user quits:
      `{kind: "human", action: {kind: "requeue", by, guidance}}`, `transition`,
      `record` `{kind: "open_generation", reason: guidance}`. On **skip**:
      `record` `{kind: "note"}` saying so. On **quit**: finish after release.
+     If the reason says the ticket filed an amendment to the pack (X-4⁸), the
+     escalation is the amendment's instead: present
+     `.detent/amendments/<id>.json` (what it names, its evidence, each edit)
+     and the five choices — approve / edit with the user's own
+     `{id, old, new}` edits / reject with a reason / skip / quit. On a
+     decision, `record` `{kind: "amendment", amendment_id, by, decision}`
+     with `decision` `{kind: "approve"}`, `{kind: "edit", edits}` or
+     `{kind: "reject", reason}`. No ticket moves. A result with `ok: false`
+     says why: present it and offer the choices again. Skip writes no note.
 7. Always call `claim` `{op: "release", ticket_id}` when the ticket's
    processing ends, whatever happened.
 

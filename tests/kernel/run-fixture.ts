@@ -5,9 +5,11 @@ import { bindAll } from "../../src/adapter/bind.js";
 import { discover } from "../../src/adapter/discover/index.js";
 import { writeBindings } from "../../src/adapter/drift.js";
 import { initLayout, writeArtifact } from "../../src/fs/layout.js";
+import { planHash } from "../../src/init/machine.js";
 import { createTicket, type NewTicket } from "../../src/kernel/tickets/mutations.js";
 import { okResult, type StageFn } from "../../src/sessions/mock.js";
 import { git, gitInit, tmpTree, writeTree } from "../helpers.js";
+import { SCHEMA_VERSION } from "../../src/schemas/common.js";
 
 /**
  * T-041 test fixture: a controllable, stack-agnostic repository — the TS port
@@ -65,17 +67,17 @@ export async function makeRunRepo(): Promise<RunRepo> {
     protected: ["tickets/**", "AGENTS.md"],
     risk: [],
     model_routing: {},
-    pinned: { agent_sdk: "0.3.191", claude_code: "2.1.191" },
+    pinned: { agent_sdk: "0.3.280", claude_code: "2.1.191" },
   });
 
-  const report = await bindAll(discover(root), { root, timeoutMs: 30_000 });
+  const report = await bindAll(discover(root), { root, timeoutMs: 30_000 , redact: (t) => t });
   if (report.interrupts.length > 0) throw new Error(`fixture binding interrupted: ${JSON.stringify(report.interrupts)}`);
   writeBindings(root, { bindings: [...report.bindings], skips: [] });
 
   writeArtifact(root, "plan/approval.json", {
     approved_by: "fixture",
     at: "2026-08-18T09:00:00.000Z",
-    plan_hash: createHash("sha256").update("fixture-plan").digest("hex"),
+    plan_hash: planHash(root),
   });
 
   git(root, "add", "-A");
@@ -90,6 +92,24 @@ export function addTicket(root: string, input: Partial<NewTicket> & { readonly i
     acceptance_criteria: ["scripts/test.sh exits 0"],
     surface: ["src/**", "tests/**"],
     ...input,
+  });
+  /**
+   * C-9‴ (PRDR-139): re-approve the plan that now exists.
+   *
+   * The fixture used to write `plan_hash: sha256("fixture-plan")` once, before
+   * any ticket existed — a value that could never equal `planHash(root)`. It
+   * was viable only because `run` parsed the approval and never compared it.
+   * A human approves a plan AFTER it is drafted, so the fixture does too.
+   */
+  approveFixturePlan(root);
+}
+
+/** The approval a human would have given for the plan currently on disk. */
+export function approveFixturePlan(root: string): void {
+  writeArtifact(root, "plan/approval.json", {
+    approved_by: "fixture",
+    at: "2026-08-18T09:00:00.000Z",
+    plan_hash: planHash(root),
   });
 }
 
@@ -149,7 +169,7 @@ export const researchValid: StageFn = (spec) => {
     /* no failure record */
   }
   return writeArtifactStage({
-    schema_version: 1,
+    schema_version: SCHEMA_VERSION,
     failure_signature: signature,
     cache_key: createHash("sha256").update(signature).digest("hex"),
     root_cause: { claim: "off-by-one in totals", confidence: "high" },
@@ -162,10 +182,20 @@ export const researchValid: StageFn = (spec) => {
   })(spec);
 };
 
-export const reviewApprove: StageFn = writeArtifactStage({ schema_version: 1, verdict: "approve" });
+export const reviewApprove: StageFn = writeArtifactStage({ schema_version: SCHEMA_VERSION, verdict: "approve" });
+
+/** A valid A-3 hypothesis, for tests that need a diagnose session to complete (PRDR-178). */
+export const diagnoseValid: StageFn = writeArtifactStage({
+  schema_version: SCHEMA_VERSION,
+  claim: "the handler drops the retry",
+  evidence: [{ file: "src/a.ts", line: 1, what: "no retry branch" }],
+  repro_test: "npm test -- a.test.ts",
+  predicted_failure: "expected 1 retry",
+  status: "proposed",
+});
 
 export const reviewChanges: StageFn = writeArtifactStage({
-  schema_version: 1,
+  schema_version: SCHEMA_VERSION,
   verdict: "changes",
   changes: [{ tag: "scope", finding: "unrelated refactor" }],
 });

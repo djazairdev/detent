@@ -4,6 +4,8 @@ import { SCHEMA_VERSION, isoTimestamp, nonEmptyString, sha256Hex } from "./commo
 import { countersSchema, reviewTags } from "./ticket.js";
 import { GATE_SLOTS } from "./gates.js";
 import { requireLocalSearchBeforeWeb } from "./init.js";
+import { CACHE_LIFETIMES } from "./cache-lifetime.js";
+import { EFFORT_REASONS } from "./roles.js";
 
 /** A-3 Hypothesis (X-4). A root cause is inadmissible as prose. */
 export const hypothesisSchema = z.strictObject({
@@ -71,9 +73,20 @@ export const reviewSchema = z
   });
 export type Review = z.infer<typeof reviewSchema>;
 
+/**
+ * V-5′ (PRDR-295): a package, `.` for the root or a directory inside the
+ * repository. A gate runs with it as its working directory, so a path that
+ * climbs out, or starts at `/`, is refused where the file is read.
+ */
+export const packagePath = z
+  .string()
+  .refine((p) => p === "." || p.split("/").every((seg) => seg !== "" && seg !== "." && seg !== ".." && !seg.includes("\\")), "is not a directory inside the repository");
+
 /** A-6 Binding record (V-2). */
 export const bindingSchema = z.strictObject({
   schema_version: z.literal(SCHEMA_VERSION),
+  /** V-5′ (PRDR-295): the package whose directory the gate runs in. Absent before packages, and so the root's. */
+  package: packagePath.default("."),
   slot: z.enum(GATE_SLOTS),
   adapter: nonEmptyString,
   ref: nonEmptyString,
@@ -93,6 +106,12 @@ export const checkpointSchema = z.strictObject({
   inputs_hash: sha256Hex,
   outputs: z.record(z.string(), z.unknown()),
   at: isoTimestamp,
+  /**
+   * N-5″ (PRDR-297): the Detent build that wrote it (`kernel/build.ts`), which
+   * PRESENT names (C-7″). Optional, so a checkpoint written before it is still
+   * reused; PRESENT counts one as a build of its own, unrecorded.
+   */
+  build: nonEmptyString.optional(),
 });
 export type Checkpoint = z.infer<typeof checkpointSchema>;
 
@@ -104,6 +123,19 @@ export const dossierSchema = z.strictObject({
   generations: z.array(z.strictObject({ index: z.number().int().nonnegative(), counters: countersSchema })),
   last_signatures: z.array(nonEmptyString).default([]),
   artifact_index: z.array(nonEmptyString).default([]),
+  /**
+   * PRDR-271: what PLAN's review said about this ticket, strongest first.
+   * Defaulted rather than required, so a dossier written before this field
+   * existed still parses — the ladder reaching a human is not the moment to
+   * fail on a schema. Empty means PLAN named nothing, not that it was unread.
+   */
+  plan_findings: z.array(nonEmptyString).default([]),
+  /**
+   * V-1⁷ (PRDR-233): the last red gate's note on the declared lifecycle
+   * scripts Detent did not run, and how an operator approves one. Absent when
+   * it ran every one, and on a dossier written before the field existed.
+   */
+  lifecycle_not_run: nonEmptyString.optional(),
   suggested_resolutions: z.array(nonEmptyString).default([]),
 });
 export type Dossier = z.infer<typeof dossierSchema>;
@@ -151,6 +183,39 @@ export const ledgerRowSchema = z.strictObject({
    * enum because the rows already written must still parse.
    */
   partial: z.enum(["crash", "turns_breach"]).optional(),
+  /**
+   * C-7‴ (PRDR-296): the `init` phase that launched the session, which PRESENT
+   * sums by (decision 16). A string, not the phase enum: a row outlives the
+   * build that wrote it, and a phase a later build renames must not make X-1's
+   * reader refuse the file. Absent on a run's rows, and on an init row written
+   * before the field.
+   */
+  phase: nonEmptyString.optional(),
+  /**
+   * S-6″ (PRDR-320): the cache lifetime the session ran with, and what it
+   * wrote at each, summed from its responses' usage. Optional, never
+   * defaulted: a row written before the fields did not record them, and a zero
+   * would say it wrote nothing at either lifetime.
+   */
+  cache_ttl: z.enum(CACHE_LIFETIMES).optional(),
+  cache_creation_5m_input_tokens: z.number().int().nonnegative().optional(),
+  cache_creation_1h_input_tokens: z.number().int().nonnegative().optional(),
+  /**
+   * N-5⁗ (PRDR-325): an `init` session's kind and length: the task its inputs
+   * named, the effort its role was routed to, and how long it ran. A costly
+   * step's estimate takes this project's own figure from them. Optional: a
+   * row written before them has none, and gives no figure; a run's row names
+   * none.
+   */
+  task: nonEmptyString.optional(),
+  effort: nonEmptyString.optional(),
+  duration_ms: z.number().int().nonnegative().optional(),
+  /**
+   * S-5⁸ (PRDR-328): why a run session ran at its level, which `detent status`
+   * counts sessions and cost by. Optional: an `init` row names none, and a row
+   * written before the field did not record it.
+   */
+  effort_reason: z.enum(EFFORT_REASONS).optional(),
 });
 export type LedgerRow = z.infer<typeof ledgerRowSchema>;
 
@@ -169,6 +234,10 @@ export const planSchema = z
       .default([]),
     assignments: z.record(z.string(), nonEmptyString).default({}),
     input_doc_hashes: z.record(z.string(), sha256Hex).default({}),
+    /** C-2‴ (PRDR-117): the increments the plan was planned in. Additive and defaulted — an older plan reads as unsliced. */
+    slices: z
+      .array(z.strictObject({ id: nonEmptyString, title: nonEmptyString, tickets: z.array(nonEmptyString).default([]) }))
+      .default([]),
   })
   .superRefine((plan, ctx) => {
     const known = new Set(plan.tickets);
@@ -204,8 +273,61 @@ export const approvalSchema = z.strictObject({
   approved_by: nonEmptyString,
   at: isoTimestamp,
   plan_hash: sha256Hex,
+  /**
+   * N-5″ (PRDR-297): the Detent builds that made the plan, as PRESENT named
+   * them, and the hash of the pack it was planned from, or null without one.
+   * Optional, since a plan approved before them is still approved; its
+   * figures then name no build (C-7″).
+   */
+  builds: z.array(nonEmptyString).optional(),
+  pack_hash: sha256Hex.nullable().optional(),
 });
 export type Approval = z.infer<typeof approvalSchema>;
+
+/**
+ * C-7 (PRDR-255): what PRESENT showed, kept for the second exit to replay.
+ *
+ * The rendered TEXT, not the inputs it was rendered from. C-7 says the first
+ * `detent run` presents the deferred plan, and `present.ts` says the summary is
+ * "rendered identically by `init` and by `run`" — a claim only a stored
+ * rendering can keep. Rebuilding it at run time from `state/` would re-derive
+ * it from checkpoints F-4 may have invalidated, which is how C-7′'s defect was
+ * produced (PRDR-087: ANALYZE and PLAN re-ran and a DIFFERENT plan reached
+ * approval).
+ *
+ * The counts travel with it because `presentStage` refuses to offer approval
+ * while any is not zero, and the second exit must not become the way around
+ * the first's gate. PRDR-296 removed `blocking`, the count of questions no
+ * assumption could carry: no planning stage asks since C-3⁗, and PRESENT
+ * lists no question (C-7‴). Every record an earlier build wrote carries it
+ * and does not parse, so `run` refuses one as it refuses any record it cannot
+ * read, and `detent init` presents the plan again. The two counts below are
+ * required for the same reason: a record without them was written before
+ * them, and so with `blocking`.
+ */
+export const presentationSchema = z.strictObject({
+  schema_version: z.literal(SCHEMA_VERSION),
+  presentation: nonEmptyString,
+  plan_hash: sha256Hex,
+  /** C-4⁵ (PRDR-292): the spec defects PRESENT listed; while any is open, neither exit offers approval. */
+  spec_defects: z.number().int().nonnegative(),
+  /**
+   * A-1⁷ (PRDR-293): the checks PRESENT named as failing on the tickets as they
+   * stood, a path no gate can fail among them (V-5′); while any does, neither
+   * exit offers approval.
+   */
+  check_failures: z.number().int().nonnegative(),
+  /**
+   * N-5″ (PRDR-297): the Detent builds that made the plan, as PRESENT named
+   * them. More than one, or one unrecorded, and neither exit approves without
+   * the operator accepting that (C-7″). Required, as the counts are: a record
+   * without them was written before them, and `detent init` presents again.
+   */
+  builds: z.array(nonEmptyString),
+  /** N-5″: the hash of the pack the plan was planned from, or null without one; the approval records it. */
+  pack_hash: sha256Hex.nullable(),
+});
+export type Presentation = z.infer<typeof presentationSchema>;
 
 /**
  * F-1's `bindings.json`: the committed collection of A-6 records. One file, so
@@ -213,11 +335,18 @@ export type Approval = z.infer<typeof approvalSchema>;
  */
 export const bindingsFileSchema = z.strictObject({
   schema_version: z.literal(SCHEMA_VERSION),
+  /**
+   * V-5′ (PRDR-295): every package DETERMINE_VERIFICATION found, bound or not,
+   * the root first. A path lies in the deepest of them, so a package with no
+   * gate still holds its own files. Absent before packages: the root alone.
+   */
+  packages: z.array(packagePath).default(["."]),
   bindings: z.array(bindingSchema).default([]),
-  /** V-1: slots deliberately left unbound, with who acknowledged it and when. */
+  /** V-1: slots deliberately left unbound, with who acknowledged it and when, per package (V-5′). */
   skips: z
     .array(
       z.strictObject({
+        package: packagePath.default("."),
         slot: bindingSchema.shape.slot,
         acknowledged_by: nonEmptyString,
         at: isoTimestamp,

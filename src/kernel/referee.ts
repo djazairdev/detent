@@ -1,6 +1,3 @@
-import { discover } from "../adapter/discover/index.js";
-import { assertNoDrift, readBindings, writeBindings } from "../adapter/drift.js";
-import type { Binding } from "../schemas/records.js";
 import type { State } from "../schemas/states.js";
 import type { Ticket } from "../schemas/ticket.js";
 import { buildDossier, dossierSummary, writeDossier } from "./dossier.js";
@@ -9,32 +6,35 @@ import {
   claimed,
   gateDrift,
   humanApproved,
+  ticketOversized,
   humanRequeue,
   type KernelEvent,
 } from "./events.js";
 import { finalizeBootstrap } from "../init/plan.js";
+import { BOOTSTRAP_TICKET_ID } from "../init/plan-write.js";
 import { currentCounters, currentGeneration, openGeneration, withCurrentCounters } from "./generations.js";
-import { clearCurrentTicket, ensureWorktree, git, markCurrentTicket, mergeWorktree, resetDirtyTracked } from "./git.js";
+import { WorktreeConflictError, clearCurrentTicket, commitStaged, ensureWorktree, markCurrentTicket, mergeWorktree, resetDirtyTracked } from "./git.js";
+import { rebaselineAccepted } from "./drift-base.js";
+import { readBindings } from "../adapter/drift.js";
+import { installDirs } from "../adapter/install.js";
 import { settleWorktree } from "./worktree-park.js";
 import { resolveFalsification } from "./dependency.js";
+import { bootstrapFinalizeDeps, finalizeStranded, promoteBootstrapBindings, requeueDriftBlocked, requeueOutageVictims, resumeOnce, type Commit, type ResumeOptions } from "./referee-sweeps.js";
 import type { RunJournal } from "./journal.js";
 import { apply, type GuardContext } from "./machine.js";
 import type { RunBranch } from "./git.js";
-import {
-  type ATTEMPT_STATES,
-  EscrowError,
-  RESUMABLE,
-  RefereeContext,
-  lastNote,
-  type CoreOptions,
-} from "./referee-context.js";
+import { Breach, EscrowError, RESUMABLE, RefereeContext, SessionRefusal, lastNote, type ATTEMPT_STATES, type CoreOptions } from "./referee-context.js";
 import { GateArm } from "./referee-gate.js";
 import { SessionArm } from "./referee-session.js";
 import { runRefereeStage } from "./referee-stage.js";
 import { allTickets, claimRefusal, isClaimed, readTicket, ready } from "./tickets/readers.js";
-import { appendNote, claim, release, writeTicket } from "./tickets/mutations.js";
+import { appendNote, claim, readClaim, release, writeTicket } from "./tickets/mutations.js";
 import { healStaleClaims } from "./plumbing.js";
 import type { LoadedConfig } from "./worstcase.js";
+import { TERMINAL_STATES } from "../schemas/states.js";
+import { noteUnitComplete } from "./ledger.js";
+import { decideAmendment, type AmendDecision, type AmendOutcome } from "./amendment-decide.js";
+import { heldEntries } from "./amendment-store.js";
 
 /**
  * T-100…T-105 — the REFEREE core (R-1…R-4, D-27, ARCH-1/ARCH-2).
@@ -52,13 +52,7 @@ import type { LoadedConfig } from "./worstcase.js";
  */
 
 export { TransitionError } from "./machine.js";
-export { SpendExhaustedError } from "./ledger.js";
-export {
-  ATTEMPT_STATES,
-  Breach,
-  EscrowError,
-  type CoreOptions,
-} from "./referee-context.js";
+export { ATTEMPT_STATES, Breach, EscrowError, type CoreOptions, SessionRefusal } from "./referee-context.js";
 export { DriftHaltSignal } from "./referee-gate.js";
 
 export interface AcquireResult {
@@ -89,11 +83,14 @@ export class RefereeCore {
   private readonly escrow = new Map<string, { ticketId: string; state: State; event: KernelEvent }>();
   private escrowSeq = 0;
   private driftSwept = false;
+  /** PRDR-277: the install's yes, spent at the pool's first draw and never again. */
+  private readonly resumeOnInstall: (commit: Commit, at: string) => void;
 
-  constructor(opts: CoreOptions, loaded: LoadedConfig, journal: RunJournal, runBranch: RunBranch) {
+  constructor(opts: CoreOptions & ResumeOptions, loaded: LoadedConfig, journal: RunJournal, runBranch: RunBranch) {
     this.ctx = new RefereeContext(opts, loaded, journal, runBranch);
     this.sessions = new SessionArm(this.ctx);
     this.gates = new GateArm(this.ctx);
+    this.resumeOnInstall = resumeOnce(opts.root, opts.resumeOnInstall, opts.announce);
   }
 
   private get root(): string {
@@ -136,8 +133,10 @@ export class RefereeCore {
   pool(): { id: string; state: State }[] {
     if (!this.driftSwept) {
       this.driftSwept = true;
-      this.requeueDriftBlocked();
+      requeueDriftBlocked(this.root, (t, e) => this.commit(t, e), this.ctx.iso());
     }
+    /* PRDR-277: before the ready set is read, like the drift sweep, so this draw hands the ticket out. */
+    this.resumeOnInstall((t, e) => this.commit(t, e), this.ctx.iso());
     const readyPool = ready(this.root);
     /**
      * PRDR-079 (C-9): a crashed run's claim on an in-flight ticket used to
@@ -150,6 +149,11 @@ export class RefereeCore {
      * would spin forever.
      */
     healStaleClaims(this.root, RESUMABLE, this.ctx.isAlive);
+    requeueOutageVictims(this.root, (t, e) => this.commit(t, e), this.ctx.iso());
+    /* PRDR-217: a DONE ticket the crash left unmerged is finalized before anyone builds on the run branch. */
+    finalizeStranded(this.root, this.ctx, (id) => this.finalizeDone(id), (id) => this.closeGen(id, "done"));
+    /* PRDR-218: a baseline the bootstrap finalize could not take is taken now, from the merged root. */
+    promoteBootstrapBindings(this.root, (text) => appendNote(this.root, BOOTSTRAP_TICKET_ID, { author: "kernel", text }));
     const resumable = allTickets(this.root).filter(
       (t) => RESUMABLE.includes(t.state) && !isClaimed(this.root, t.id) && !readyPool.some((r) => r.id === t.id),
     );
@@ -165,7 +169,7 @@ export class RefereeCore {
     if (!pool.some((p) => p.id === id)) {
       return { ok: false, reason: claimRefusal(this.root, id) };
     }
-    if (!claim(this.root, id, this.ctx.worker)) {
+    if (!claim(this.root, id, this.ctx.worker, () => this.ctx.iso())) {
       return { ok: false, reason: `claimed by another worker` };
     }
     markCurrentTicket(this.root, id);
@@ -181,8 +185,11 @@ export class RefereeCore {
      * own and move aside untracked residue belonging to someone else. The
      * READY branch below returns immediately, so without this a fresh claim
      * simply inherits whatever a terminated session left in the tree — and
-     * fails its gate on paths D-21 forbids it from touching.
+     * fails its gate on paths D-21 forbids it from touching. PRDR-214: the
+     * index first — what an earlier generation staged and never committed is
+     * unstaged so the same parking judges it (gate-313's staged probe file).
      */
+
     const settled = settleWorktree(workDir, ticket.surface);
     if (settled !== null) this.ctx.journal.appendTicketEvent(id, { event: "worktree", at: this.ctx.iso(), ...settled });
     if (ticket.state === "READY") {
@@ -208,26 +215,6 @@ export class RefereeCore {
   }
 
   /* -------------------------------------------------- drift (V-3, D-23) */
-
-  private requeueDriftBlocked(): void {
-    const bindings = readBindings(this.root).bindings;
-    if (bindings.length === 0) return;
-    try {
-      assertNoDrift(bindings, discover(this.root));
-    } catch {
-      return;
-    }
-    for (const ticket of allTickets(this.root)) {
-      if (ticket.state !== "BLOCKED" || !lastNote(ticket).startsWith("drift-blocked:")) continue;
-      const requeued = this.commit(ticket, humanRequeue("verify-sync-rebaseline"));
-      const generations = openGeneration(requeued, {
-        at: this.ctx.iso(),
-        reason: `gate drift re-baselined via verify sync; ${lastNote(ticket)}`,
-      });
-      writeTicket(this.root, { ...requeued, generations });
-      appendNote(this.root, ticket.id, { author: "kernel", text: "requeued after drift re-baseline (V-3/X-8)" });
-    }
-  }
 
   /**
    * After a GATE_DRIFT unwind: every non-terminal CLAIMED ticket blocks with
@@ -256,14 +243,55 @@ export class RefereeCore {
   /* ------------------------------------------------------ derived moves */
 
   /** R-4: the sole billable path — the session arm meters, this core mints. */
-  async attempt(id: string, state: (typeof ATTEMPT_STATES)[number]): Promise<{ falsifiedRef?: string }> {
+  async attempt(id: string, state: (typeof ATTEMPT_STATES)[number]): Promise<{ falsifiedRef?: string; oversizedRef?: string }> {
     const ticket = readTicket(this.root, id);
+    /**
+     * D-19 (PRDR-181): a session launches only on a ticket THIS worker holds,
+     * in the state being attempted.
+     *
+     * `attempt` is a driver-facing tool and read neither. Calling it on a READY,
+     * unclaimed ticket launched a real backend session from the root checkout —
+     * out of lifecycle order, on work nobody had claimed, with the claim's
+     * work directory, base snapshot and hook policy all absent because
+     * `acquire` establishes them. D-19 calls "no transition on an unverified
+     * claim" the single most important property the referee holds; a launch is
+     * how a transition is earned, so it belongs behind the same check.
+     */
+    const owner = readClaim(this.root, id)?.owner;
+    if (owner !== this.ctx.worker) {
+      throw new SessionRefusal(
+        `attempt refused: ${id} is ${owner === undefined ? "not claimed" : `claimed by ${owner}`} — ` +
+          `acquire it before attempting (D-19). A session costs money and the claim is what makes it legal.`,
+      );
+    }
+    /**
+     * And not on finished work. The first version of this check demanded
+     * `ticket.state === state`, which is wrong: `attempt("IN_PROGRESS")` is
+     * legitimately called while the ticket is READY — the attempt earns the
+     * transition, it does not follow it. What is never legitimate is launching
+     * a session on a ticket the ladder has already left.
+     */
+    if (TERMINAL_STATES.has(ticket.state)) {
+      throw new SessionRefusal(
+        `attempt refused: ${id} is ${ticket.state} — a terminal ticket has no session left to run (X-3).`,
+      );
+    }
     const workDir = this.ctx.workDirFor(id);
     await this.sessions.launch(ticket, state, this.sessions.attemptInputs(ticket, state, workDir), workDir);
+    /**
+     * X-3′ (PRDR-289): read after every attempt, since each of the four
+     * states admits the signal. The three fix prompts described it while the
+     * referee read it after IN_PROGRESS alone, so a fix session's signal was
+     * written, ignored, and deleted at the next launch.
+     * X-4′ (PRDR-111): a dependency when the missing paths resolve, the X-4
+     * stop when they do not.
+     */
+    const falsified = this.sessions.consumeFalsifiedSignal(id);
+    if (falsified !== null) return { falsifiedRef: this.mintFor(id, resolveFalsification(this.root, id, falsified, this.ctx.iso())) };
+    /** X-4″ (PRDR-102): larger than one session — a human's, with the proposal attached. An implementer's finding alone. */
     if (state === "IN_PROGRESS") {
-      const falsified = this.sessions.consumeFalsifiedSignal(id);
-      /** X-4′ (PRDR-111): a dependency when the missing paths resolve, the X-4 stop when they do not. */
-      if (falsified !== null) return { falsifiedRef: this.mintFor(id, resolveFalsification(this.root, id, falsified, this.ctx.iso())) };
+      const oversized = this.sessions.consumeOversizedSignal(id);
+      if (oversized !== null) return { oversizedRef: this.mintFor(id, ticketOversized(oversized.note, oversized.split)) };
     }
     return {};
   }
@@ -283,16 +311,18 @@ export class RefereeCore {
   }
 
   /** C-10/X-8: a human act is its own evidence; who and how are recorded. */
-  recordHuman(
-    id: string,
-    action: { kind: "approve"; by: string } | { kind: "requeue"; by: string; guidance: string },
-  ): { ref: string } {
+  recordHuman(id: string, action: { kind: "approve"; by: string } | { kind: "requeue"; by: string; guidance: string }): { ref: string } {
     if (action.kind === "approve") {
       appendNote(this.root, id, { author: action.by, text: `human-approved: by ${action.by} at escalation (C-10)` });
       return { ref: this.mintFor(id, humanApproved(`approved in-run by ${action.by} (C-10)`)) };
     }
     appendNote(this.root, id, { author: action.by, text: `requeued with guidance (C-10): ${action.guidance}` });
     return { ref: this.mintFor(id, humanRequeue(`requeue by ${action.by}: ${action.guidance}`)) };
+  }
+
+  /** X-4⁸ (PRDR-286): the operator's decision on an amendment. It moves no ticket, so it mints nothing. */
+  decideAmendment(id: string, by: string, decision: AmendDecision): AmendOutcome {
+    return decideAmendment(this.root, id, by, decision, this.ctx.iso());
   }
 
   /* ------------------------------------------------- lifecycle bookkeeping */
@@ -344,17 +374,38 @@ export class RefereeCore {
      * C-4: bootstrap #1's gates just passed, so greenfield's provisional
      * bindings become the baseline. A no-op for every other ticket.
      */
-    finalizeBootstrap(this.root, ticket.id, {
-      readBindings: () => readBindings(this.root),
-      writeBindings: (file) => writeBindings(this.root, file as { bindings: Binding[]; skips: never[] }),
-      rediscover: () => discover(this.root).candidates,
-      note: (text) => appendNote(this.root, ticket.id, { author: "kernel", text }),
-    });
-    git(workDir, "add", "-A");
-    const dirty = git(workDir, "status", "--porcelain").trim();
-    if (dirty !== "") git(workDir, "commit", "-q", "-m", `${ticket.id}: finalize`);
+    /* PRDR-218: rediscovery runs in the work directory — the tree that passed — never the root before the merge. */
+    finalizeBootstrap(this.root, ticket.id, bootstrapFinalizeDeps(this.root, workDir, (text) => appendNote(this.root, ticket.id, { author: "kernel", text })));
+    /*
+     * V-1⁗ (PRDR-211): what the referee installed is never part of the change set; the lockfile it produced is. PRDR-216: an
+     * ignored directory is never named. V-5′ (PRDR-295): the referee installs in each package's directory, so each one's is excluded.
+     */
+    commitStaged(workDir, installDirs(readBindings(this.root).packages, this.ctx.ecosystems), `${ticket.id}: finalize`);
     /** B-2: worktree mode merges --no-ff into the RUN branch — never the base. */
-    if (this.ctx.worktree) mergeWorktree(this.root, ticket.id);
+    if (this.ctx.worktree) {
+      try {
+        mergeWorktree(this.root, ticket.id);
+      } catch (err) {
+        /**
+         * B-2′ (PRDR-145a): a conflict routes to the human as a breach rather
+         * than escaping as an unclassified throw. It used to exit 1 with the
+         * ticket already DONE, its work unmerged and its worktree orphaned.
+         */
+        if (!(err instanceof WorktreeConflictError)) throw err;
+        appendNote(this.root, ticket.id, { author: "kernel", text: err.message });
+        throw new Breach(err.message);
+      }
+    }
+    /* V-3‴ (PRDR-226): an accepted verification change is now the run branch's — the baseline follows it. */
+    const rebased = rebaselineAccepted(this.root, ticket.id, this.ctx.iso());
+    if (rebased.length > 0) appendNote(this.root, ticket.id, { author: "kernel", text: `verification re-baselined at merge (V-3‴): ${rebased.join(", ")}` });
+    /**
+     * X-1⁵ (PRDR-191): a ticket reached DONE and its work is merged, so the run
+     * has completed a unit and the no-progress breaker resets. Last in the
+     * method deliberately — a merge conflict throws above, and a ticket whose
+     * work did not land is not progress.
+     */
+    noteUnitComplete(this.root);
   }
 
   /* -------------------------------------------------------------- admit */
@@ -399,12 +450,18 @@ export class RefereeCore {
 
   /* ------------------------------------------------------------- reads */
 
+  /**
+   * X-4⁸ (PRDR-286): a READY ticket an amendment holds is pending too. It waits
+   * on the operator's decision or on the re-plan, so a run that leaves only
+   * held work exits 10 and names the amendment, where it exited 0.
+   */
   statusData(): { pending: PendingEntry[]; states: { id: string; state: State }[] } {
     const tickets = allTickets(this.root);
     return {
-      pending: tickets
-        .filter((t) => t.state === "NEEDS_HUMAN" || t.state === "BLOCKED")
-        .map((t) => ({ id: t.id, state: t.state, reason: lastNote(t) })),
+      pending: [
+        ...tickets.filter((t) => t.state === "NEEDS_HUMAN" || t.state === "BLOCKED").map((t) => ({ id: t.id, state: t.state, reason: lastNote(t) })),
+        ...heldEntries(this.root, tickets),
+      ],
       states: tickets.map((t) => ({ id: t.id, state: t.state })),
     };
   }

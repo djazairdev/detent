@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,7 +8,13 @@ import { REDACTED, containsSecrets, scrub } from "../../src/kernel/scrub.js";
 import { EXIT_OK, run } from "../../src/kernel/run.js";
 import { readTicket } from "../../src/kernel/tickets/readers.js";
 import { guardToolUse, type GuardPolicy } from "../../src/sessions/guard.js";
+import { STRUCTURAL_PROTECTED } from "../../src/schemas/common.js";
+import { fileURLToPath } from "node:url";
+
+/** PRDR-178: the repository root, for the cross-site policy audit below. */
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 import { EXTENDED_CACHE_HEADER, SESSION_ENV_ALLOWLIST, buildSessionEnv } from "../../src/sessions/env.js";
+import { buildOptions } from "../../src/sessions/sdk.js";
 import { MockBackend, okResult, type StageFn } from "../../src/sessions/mock.js";
 import { loadPromptSet } from "../../src/sessions/prompts.js";
 import { git, removeTree, writeTree } from "../helpers.js";
@@ -49,7 +55,7 @@ describe("T-052 evasion pack: 0 protected writes (SEC-3)", () => {
     ["absolute path escape", "/etc/passwd"],
     ["parent traversal", "/wt/../secrets.env"],
     ["dotdot inside surface", "/wt/src/../.detent/plan/t1.json"],
-    ["symlinky nested traversal", "/wt/src/a/../../AGENTS.md"],
+    ["lexical `..` back into a protected path", "/wt/src/a/../../AGENTS.md"],
     ["out-of-surface sibling", "/wt/README.md"],
     ["home-dir credential", "/wt/../../.ssh/id_rsa"],
   ];
@@ -64,12 +70,126 @@ describe("T-052 evasion pack: 0 protected writes (SEC-3)", () => {
     expect(allowed).toEqual([]);
   });
 
+  /**
+   * S-2⁗ (PRDR-127) — the same boundary, against REAL symbolic links.
+   *
+   * The cases above include `/wt/src/a/../../AGENTS.md`, which was labelled
+   * "symlinky nested traversal" until PRDR-153 renamed it to what it is:
+   * lexical `..` segments, no link anywhere. The
+   * pack asserted the thing it was named for and never tested it, and a link
+   * inside the worktree walked past all three checks — the boundary, the
+   * declared surface, and the SEC-3 protected globs.
+   *
+   * The temp root is deliberately NOT resolved here: on macOS it sits under
+   * `/var/folders`, itself a link to `/private/var`, so this also proves the
+   * guard resolves BOTH sides rather than calling every temp worktree an escape.
+   */
+  describe("SEC-3: a symbolic link is judged by where it LANDS, not by what it is called", () => {
+    function linkedRepo(): { readonly root: string; readonly policy: GuardPolicy } {
+      const root = mkdtempSync(path.join(tmpdir(), "detent-sym-"));
+      const outside = mkdtempSync(path.join(tmpdir(), "detent-out-"));
+      roots.push(root, outside);
+      for (const d of ["src", "src/real", ".detent", "forbidden"]) mkdirSync(path.join(root, d), { recursive: true });
+      symlinkSync(outside, path.join(root, "src", "escape"));
+      symlinkSync(path.join(root, "forbidden"), path.join(root, "src", "inward"));
+      symlinkSync(path.join(root, ".detent"), path.join(root, "src", "cfg"));
+      symlinkSync(path.join(root, "src", "real"), path.join(root, "src", "legit"));
+      /* Dangling on purpose: the Write tool creates parent directories. */
+      symlinkSync(path.join(outside, "not-created-yet"), path.join(root, "src", "dangling"));
+      return { root, policy: { surface: ["src/**"], protectedGlobs: [".detent/**", "AGENTS.md"], workRoot: root } };
+    }
+
+    const ESCAPES: ReadonlyArray<readonly [string, string]> = [
+      ["out of the worktree entirely", "src/escape/stolen.txt"],
+      ["out of the declared surface", "src/inward/x.txt"],
+      ["through the SEC-3 protected floor", "src/cfg/config.json"],
+      ["through a DANGLING link, out of the worktree", "src/dangling/x.txt"],
+    ];
+
+    it.each(ESCAPES)("denies a write that lands %s", (_label, rel) => {
+      const { root, policy } = linkedRepo();
+      expect(guardToolUse("Write", { file_path: path.join(root, rel) }, policy).decision).toBe("deny");
+    });
+
+    it("all four escapes are denied — zero writes land outside where the ticket may write", () => {
+      const { root, policy } = linkedRepo();
+      const allowed = ESCAPES.filter(([, rel]) => guardToolUse("Write", { file_path: path.join(root, rel) }, policy).decision === "allow");
+      expect(allowed).toEqual([]);
+    });
+
+    it("the destination is judged, never the mechanism: a link INSIDE the surface still works", () => {
+      const { root, policy } = linkedRepo();
+      /* Denying links as a class would refuse node_modules/.bin and every monorepo workspace link. */
+      expect(guardToolUse("Write", { file_path: path.join(root, "src/legit/a.ts") }, policy).decision).toBe("allow");
+      expect(guardToolUse("Write", { file_path: path.join(root, "src/real/brand-new.ts") }, policy).decision).toBe("allow");
+      expect(guardToolUse("Write", { file_path: path.join(root, "src/plain.ts") }, policy).decision).toBe("allow");
+    });
+
+    it("the worktree bound covers reads too (P7), and says which path the verdict is about", () => {
+      const { root, policy } = linkedRepo();
+      expect(guardToolUse("Read", { file_path: path.join(root, "src/escape/stolen.txt") }, policy).decision).toBe("deny");
+      expect(guardToolUse("Read", { file_path: path.join(root, "src/legit/a.ts") }, policy).decision).toBe("abstain");
+      const protectedWrite = guardToolUse("Write", { file_path: path.join(root, "src/cfg/config.json") }, policy);
+      expect(protectedWrite.reason).toContain("reached through a symbolic link from src/cfg/config.json");
+      expect(protectedWrite.reason).toContain(".detent/config.json is protected");
+    });
+  });
+
+  /**
+   * SEC-3′ (PRDR-132) — asserted against the PRODUCT's floor.
+   *
+   * The evasion row above named "tamper with the git hooks" and proved nothing
+   * about the product: it is written entirely against THIS FILE's own `POLICY`.
+   * The remediation plan recorded the cause as that policy's `.git/**` entry,
+   * and that is wrong — the denial is overdetermined, because the same `POLICY`
+   * declares `surface: ["src/**"]`, so the path is refused as out-of-surface
+   * whether or not the protected entry is there. Removing the entry would not
+   * have falsified the row. Nothing in
+   * `src/` did: `.git` appeared in no protected set anywhere, so under a broad
+   * surface — which the C-4 bootstrap ticket declares, and which the surface
+   * lever used to grant on request — `.git/config` and `.gitattributes` were
+   * writable. That is not a sensitive-file problem; it is an execution one:
+   * git runs `filter.<name>.clean` through a shell on `git add`.
+   *
+   * `STRUCTURAL_PROTECTED` is imported rather than retyped, so this test cannot
+   * pass on a floor the product does not actually enforce.
+   */
+  describe("SEC-3′: `.git` is closed by the product's own structural floor", () => {
+    const productPolicy: GuardPolicy = {
+      /* The broadest surface the product can produce — the bootstrap ticket's. */
+      surface: ["**"],
+      /* Exactly what referee-session.ts builds, on a config that declares nothing. */
+      protectedGlobs: [...STRUCTURAL_PROTECTED],
+      workRoot: "/wt",
+    };
+    const GIT_TARGETS = [
+      "/wt/.git/config",
+      "/wt/.git/hooks/pre-commit",
+      "/wt/.git/HEAD",
+      "/wt/.git",
+    ] as const;
+
+    it.each(GIT_TARGETS)("denies a write to %s even with surface `**`", (target) => {
+      expect(guardToolUse("Write", { file_path: target }, productPolicy, (x) => x).decision).toBe("deny");
+    });
+
+    it("ordinary work under the same broad surface is unaffected", () => {
+      expect(guardToolUse("Write", { file_path: "/wt/src/a.ts" }, productPolicy, (x) => x).decision).toBe("allow");
+      expect(guardToolUse("Write", { file_path: "/wt/README.md" }, productPolicy, (x) => x).decision).toBe("allow");
+    });
+  });
+
   it("a Bash tool call that names no path is not an escape hatch — the kernel re-verifies (P2)", () => {
     /**
-     * The guard allows path-less calls (bricking gains nothing); containment
-     * of what Bash *does* is the allowlist plus the kernel's own gate re-run.
+     * S-2‴ (PRDR-122): containment of what Bash *does* is the allowlist plus
+     * the kernel's own gate re-run — which is exactly why this must ABSTAIN.
+     * A hook decision of `allow` is terminal in the SDK's permission order, so
+     * the previous blanket allow here overrode the allowlist it names as the
+     * real control: `implement` is granted only `Bash(git add:*)` and
+     * `Bash(git commit:*)`, and every other command was being permitted by
+     * this line. The comment was right; the assertion contradicted it.
      */
-    expect(guardToolUse("Bash", { command: "cat /etc/passwd" }, POLICY).decision).toBe("allow");
+    expect(guardToolUse("Bash", { command: "cat /etc/passwd" }, POLICY).decision).toBe("abstain");
   });
 });
 
@@ -138,23 +258,92 @@ describe("T-052 SEC-4: secrets never reach ledger/logs", () => {
  */
 
 describe("T-052 SEC-4: the session env is an allowlist", () => {
-  it("only allowlisted variables cross into a session; everything else is stripped", () => {
-    const parent = {
+  /**
+   * SEC-4′ (PRDR-133). This block used to call `buildSessionEnv` directly. It
+   * proved the filter filters — which it does — and nothing about sessions,
+   * because `buildOptions` never called it: the SDK inherits `process.env` when
+   * `env` is omitted, so every session held the operator's cloud credentials
+   * while this test stayed green. It now asserts on the ENTRY POINT, which is
+   * the only place the property is either true or false.
+   */
+  it("only allowlisted variables cross into a session — asserted on the options a session is actually built with", () => {
+    const before = { ...process.env };
+    process.env["AWS_SECRET_ACCESS_KEY"] = "must-not-cross";
+    process.env["DEPLOY_TOKEN"] = "must-not-cross";
+    process.env["GITHUB_TOKEN"] = "must-not-cross";
+    try {
+      const options = buildOptions(
+        {
+          role: "implement",
+          ticketId: "t1",
+          promptPrefix: "p",
+          promptVariable: "v",
+          cwd: "/wt",
+          artifactOut: "/wt/.detent/runs/t1/out.json",
+          allowedTools: ["Read"],
+          permissionMode: "",
+          model: "",
+          policy: { surface: ["src/**"], protectedGlobs: [], workRoot: "/wt" },
+        },
+        { policy: { surface: ["**"], protectedGlobs: [], workRoot: "/wt" } },
+      );
+      const env = options.env as Record<string, string> | undefined;
+      expect(env, "buildOptions must set env, or the session inherits process.env").toBeDefined();
+      expect(env?.["AWS_SECRET_ACCESS_KEY"]).toBeUndefined();
+      expect(env?.["DEPLOY_TOKEN"]).toBeUndefined();
+      expect(env?.["GITHUB_TOKEN"]).toBeUndefined();
+      expect(env?.["PATH"]).toBe(process.env["PATH"]);
+      /** S-6: the extended cache TTL rides on the same call, and had never been requested. */
+      expect(env?.["ANTHROPIC_CUSTOM_HEADERS"]).toBe(EXTENDED_CACHE_HEADER);
+      /** Not in the allowlist, so it cannot leak — a positive assertion. */
+      expect(SESSION_ENV_ALLOWLIST).not.toContain("AWS_SECRET_ACCESS_KEY");
+    } finally {
+      for (const k of ["AWS_SECRET_ACCESS_KEY", "DEPLOY_TOKEN", "GITHUB_TOKEN"]) {
+        if (before[k] === undefined) delete process.env[k];
+        else process.env[k] = before[k];
+      }
+    }
+  });
+
+  /**
+   * PRDR-148 — the allowlist must carry every transport the product accepts.
+   *
+   * `hasLiveBackendAuth` names three; the allowlist carried one. While
+   * `buildSessionEnv` had no caller that was inert — sessions inherited the
+   * token and worked — so wiring the allowlist turned a harmless staleness
+   * into an outage on the documented subscription-CI path. This ties the two
+   * together so a fourth transport cannot be added to one and forgotten in
+   * the other.
+   */
+  it("every auth transport the product accepts survives the allowlist", () => {
+    const source = readFileSync(new URL("../../src/sessions/live.ts", import.meta.url), "utf8");
+    const transports = [...source.matchAll(/env\["([A-Z_]+)"\]/g)]
+      .map((m) => m[1] as string)
+      .filter((name) => name !== "DETENT_NO_LIVE");
+    expect(transports.length, "no transports found — the regex has drifted from live.ts").toBeGreaterThan(1);
+    for (const name of transports) {
+      expect(SESSION_ENV_ALLOWLIST, `${name} is an accepted transport but is stripped from sessions`).toContain(name);
+    }
+  });
+
+  it("a session can still reach the network an operator's environment requires", () => {
+    /* Stripping these does not make a session safer; it makes it unable to call the API. */
+    for (const name of ["HTTPS_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS"]) {
+      expect(SESSION_ENV_ALLOWLIST).toContain(name);
+    }
+  });
+
+  /** The filter's own unit behaviour, kept — but it is no longer the SEC-4 evidence. */
+  it("buildSessionEnv strips what is not allowlisted", () => {
+    const env = buildSessionEnv({
       PATH: "/usr/bin",
       HOME: "/home/dev",
       ANTHROPIC_API_KEY: "sk-ant-test",
       AWS_SECRET_ACCESS_KEY: "must-not-cross",
-      DEPLOY_TOKEN: "must-not-cross",
-      GITHUB_TOKEN: "must-not-cross",
-    };
-    const env = buildSessionEnv(parent);
+    });
     expect(env["PATH"]).toBe("/usr/bin");
     expect(env["ANTHROPIC_API_KEY"]).toBe("sk-ant-test");
     expect(env["AWS_SECRET_ACCESS_KEY"]).toBeUndefined();
-    expect(env["DEPLOY_TOKEN"]).toBeUndefined();
-    expect(env["GITHUB_TOKEN"]).toBeUndefined();
-    /** Not in the allowlist, so it cannot leak — a positive assertion. */
-    expect(SESSION_ENV_ALLOWLIST).not.toContain("AWS_SECRET_ACCESS_KEY");
   });
 
   it("the extended prompt-cache TTL is set explicitly, not left to inheritance (PRDR-054)", () => {
@@ -253,28 +442,178 @@ describe("T-052 SEC-* aggregate invariants", () => {
     expect(buildReport(root, { baseBranch: "main" }).base_branch_writes.value).toBe(0);
   });
 
-  it("the reflog metric counts a reverted tamper honestly (a reverted write is still a write)", () => {
-    /**
-     * A direct unit check of the source §14 reads — no fragile working-tree
-     * dance. The T-042 red-team fixture exercises the same path through a run.
-     */
-    const { root } = tmpRepoWithBaseWrite();
+  /**
+   * PRDR-143: a REAL tamper, reverted by the guard.
+   *
+   * This used to call `tmpRepoWithBaseWrite()` — `git init` → commit → commit.
+   * There was no tamper and no revert: `baseReflogWrites` is `entries - 1`, so
+   * an ordinary second commit yields 1 and the assertion passed. Its comment
+   * claimed "the T-042 red-team fixture exercises the same path through a run";
+   * that fixture never reads the metric, and every other assertion on it in
+   * this suite is `=== 0`. So the one property the metric exists for — that
+   * the guard's own restore leaves honest evidence — was asserted by nothing.
+   */
+  it("the reflog metric counts a reverted tamper honestly (a reverted write is still a write)", async () => {
+    const { root } = await makeRunRepo();
     roots.push(root);
-    expect(baseReflogWrites(root, "main")).toBeGreaterThan(0);
+    addTicket(root, { id: "t1" });
+    const baseSha = git(root, "rev-parse", "main").trim();
+    expect(baseReflogWrites(root, "main"), "a fresh base has only its creation").toBe(0);
+
+    /* A hostile session commits to the base branch; enforceBaseGuard reverts it. */
+    const hostile: StageFn = (spec) => {
+      const runBranch = git(spec.cwd, "rev-parse", "--abbrev-ref", "HEAD").trim();
+      git(spec.cwd, "checkout", "-q", "main");
+      writeTree(spec.cwd, { "implant.txt": "pwned\n" });
+      git(spec.cwd, "add", "implant.txt");
+      git(spec.cwd, "commit", "-q", "-m", "implant on base");
+      git(spec.cwd, "checkout", "-q", runBranch);
+      return implementGreen(spec);
+    };
+    await run({ root, backend: new MockBackend({ implement: hostile, review: reviewApprove }), prompts: PROMPTS, runId: "reflog" });
+
+    /* The guard restored the base — and the metric still says a write happened. */
+    expect(git(root, "rev-parse", "main").trim(), "the base must be restored").toBe(baseSha);
+    /**
+     * PRDR-159: TWO, not "greater than zero".
+     *
+     * The hostile commit is one entry and the guard's restore is another, and
+     * `toBeGreaterThan(0)` was satisfied by the commit alone — so the metric
+     * could drop the restore entirely and this still passed. The restore is
+     * the half the docstring is actually about.
+     */
+    expect(baseReflogWrites(root, "main"), "the tamper AND the guard's own restore").toBeGreaterThanOrEqual(2);
+    /**
+     * PRDR-159: and the restore says who did it. The metric counts entries by
+     * hash now, so it no longer depends on the message — which would leave the
+     * `-m` untested decoration. The reflog is EVIDENCE, and evidence a person
+     * reads: "detent: base guard restore" is the difference between knowing
+     * something moved the base back and knowing what did.
+     */
+    expect(git(root, "reflog", "show", "--format=%gs", "main"), "the guard signs its own restore").toContain(
+      "detent: base guard restore",
+    );
+  });
+
+  /**
+   * PRDR-159: a tamper that leaves no commit at all.
+   *
+   * `git update-ref` without `-m` writes a reflog entry whose MESSAGE is
+   * empty, and the metric filtered empty lines before counting — so a base
+   * that demonstrably moved and came back reported 0. The filter was there to
+   * drop the trailing newline of `--format=%gs`; it took the real entries with
+   * it.
+   */
+  it("counts a base tamper performed with update-ref alone, which leaves no commit behind", async () => {
+    const { root } = await makeRunRepo();
+    roots.push(root);
+    const baseSha = git(root, "rev-parse", "main").trim();
+    /* On a side branch, so building the target commit does not move `main` itself. */
+    git(root, "checkout", "-q", "-b", "scratch");
+    writeTree(root, { "other.txt": "x\n" });
+    git(root, "add", "other.txt");
+    git(root, "commit", "-q", "-m", "elsewhere");
+    const moved = git(root, "rev-parse", "HEAD").trim();
+    git(root, "checkout", "-q", "main");
+    const before = baseReflogWrites(root, "main");
+
+    git(root, "update-ref", "refs/heads/main", moved);
+    git(root, "update-ref", "refs/heads/main", baseSha);
+
+    expect(git(root, "rev-parse", "main").trim(), "the base is back where it started").toBe(baseSha);
+    expect(baseReflogWrites(root, "main") - before, "two moves the metric must not be blind to").toBe(2);
   });
 });
 
-function tmpRepoWithBaseWrite(): { root: string } {
-  const root = mkdtempSync(path.join(tmpdir(), "detent-sec-"));
-  git(root, "init", "-q", "-b", "main");
-  git(root, "config", "user.email", "t@t");
-  git(root, "config", "user.name", "t");
-  writeTree(root, { "a.txt": "1\n" });
-  git(root, "add", "-A");
-  git(root, "commit", "-q", "-m", "init");
-  /** A second commit on main — a write beyond creation. */
-  writeTree(root, { "a.txt": "2\n" });
-  git(root, "add", "-A");
-  git(root, "commit", "-q", "-m", "second");
-  return { root };
-}
+/**
+ * SEC-4 (PRDR-177) — the redactor must not eat the evidence.
+ *
+ * PRDR-169 put `scrub` on the `appendNote` seam under a comment claiming
+ * "scrubbing kernel-authored text too is harmless". It was not. Two defects in
+ * `scrub` itself — a missing word boundary, and a value pattern that matched
+ * any six non-space characters — corrupted compiler errors, a human operator's
+ * own requeue guidance, and content-hashed build paths on their way into
+ * `.detent/plan/<id>.json`, which is then handed back to the review session as
+ * `operator_record`. A reviewer was judging mangled evidence.
+ *
+ * Both directions are asserted, because a redactor is only as good as the pair.
+ */
+describe("SEC-4 scrub redacts secrets without eating ordinary text", () => {
+  it("leaves real diagnostics, operator guidance and hashed paths intact", () => {
+    for (const text of [
+      "Unexpected token: identifier at src/pay.ts line 42",
+      "requeued with guidance (C-12): the token: refresh path drops the retry",
+      "B-5 resume reset: dist/assets/task-BX9kL2mQz8vN4pR7tY1wS3dF5gH6.js",
+      "risk-labelled by the plan: infra/risk-0123456789abcdef01234567.tf",
+      "surface granted: src/payments/** (the ticket names it)",
+    ]) {
+      expect(scrub(text), text).toBe(text);
+    }
+  });
+
+  it("still redacts every shape it is there for", () => {
+    for (const [text, leak] of [
+      ["deploying with token=ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],
+      ["auth.ts hardcodes sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA", "sk-ant-api03-"],
+      ['export API_KEY="s3cr3tvalue123"', "s3cr3tvalue123"],
+      ["AWS key AKIAIOSFODNN7EXAMPLE", "AKIAIOSFODNN7EXAMPLE"],
+      ["Authorization: Bearer abcdefghijklmnop1234", "abcdefghijklmnop1234"],
+      ["slack xoxb-1234567890-abcdefghij", "xoxb-1234567890"],
+    ] as [string, string][]) {
+      const out = scrub(text);
+      expect(out, text).not.toContain(leak);
+      expect(out, text).toContain("REDACTED");
+    }
+  });
+
+  /** The plural was consumed by `s?` outside the capture group and silently dropped. */
+  it("keeps the key name it redacts, plural included", () => {
+    expect(scrub("session ended: tokens: 128374 in, 4211 out")).toContain("tokens:");
+    expect(scrub('export API_KEY="s3cr3tvalue123"')).toContain("API_KEY=");
+  });
+
+  /** A note is evidence a reviewer reads; redaction must be idempotent so a re-scrub cannot compound. */
+  it("is idempotent", () => {
+    for (const text of ["token=ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "Unexpected token: identifier"]) {
+      expect(scrub(scrub(text))).toBe(scrub(text));
+    }
+  });
+});
+
+/**
+ * SEC-3 (PRDR-178) — EVERY production GuardPolicy carries the structural floor.
+ *
+ * PRDR-172 fixed one site that omitted it and its commit asserted the floor is
+ * what "every other GuardPolicy construction site in production spreads in".
+ * That was false: `src/cli/init.ts` carried three of the fourteen globs, under a
+ * surface of `**`, and PRDR-172's own fix had no test — reverting it left the
+ * suite green. This asserts the property across the sites rather than at one of
+ * them, so the next site that forgets is named by a failure and not by an audit.
+ */
+describe("SEC-3 the structural floor reaches every policy a session runs under", () => {
+  const sites = [
+    { file: "src/cli/init.ts", label: "the init session policy" },
+    { file: "src/kernel/referee-context.ts", label: "the driver hook policy" },
+    { file: "src/kernel/referee-session.ts", label: "the per-ticket session policy" },
+  ];
+
+  it("each site spreads STRUCTURAL_PROTECTED rather than listing globs by hand", () => {
+    for (const { file, label } of sites) {
+      const source = readFileSync(path.join(REPO_ROOT, file), "utf8");
+      const policies = source.match(/protectedGlobs:\s*\[[^\]]*\]/g) ?? [];
+      expect(policies.length, `${file} builds no GuardPolicy — this map is stale`).toBeGreaterThan(0);
+      for (const policy of policies) {
+        expect(policy, `${label} (${file}) must carry the SEC-3 floor, not a hand-written subset`).toContain(
+          "STRUCTURAL_PROTECTED",
+        );
+      }
+    }
+  });
+
+  /** And the floor itself still holds the four paths writing into which is executing. */
+  it("the floor names .git and the run's own audit trail", () => {
+    for (const glob of [".git/**", ".git", ".detent/ledger.jsonl", ".detent/state/**"]) {
+      expect(STRUCTURAL_PROTECTED, glob).toContain(glob);
+    }
+  });
+});

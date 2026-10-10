@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import picomatch from "picomatch";
+import { ARCHIVE_DIR } from "../schemas/pack.js";
 
 /**
  * T-061 — planning-document discovery (C-2's docs half).
@@ -36,8 +37,28 @@ export const DOC_PATTERNS: readonly string[] = [
   "docs/**/*.rst",
 ];
 
-/** Never traversed: dependency and state trees are not planning documents. */
-const SKIP_DIRS = new Set(["node_modules", ".git", ".detent", "dist", "build", "vendor", "target", ".venv", "__pycache__"]);
+/** PRDR-086: the configured slice scope, or the full C-2 family set. */
+export function docPatternsFor(planDocs: readonly string[] | undefined): readonly string[] {
+  return planDocs !== undefined && planDocs.length > 0 ? planDocs : DOC_PATTERNS;
+}
+
+/**
+ * C-2¹³ (PRDR-283): the families that name a planning document by its file
+ * name, README's excepted, which names context. WRITE never keeps a document
+ * of one as context.
+ */
+export const PLANNING_NAMES: readonly string[] = DOC_PATTERNS.filter((p) => !p.includes("/") && !p.startsWith("README"));
+
+/** Never traversed: dependency and state trees are not planning documents, nor the project's code (C-2¹¹). */
+export const SKIP_DIRS: ReadonlySet<string> = new Set(["node_modules", ".git", ".detent", "dist", "build", "vendor", "target", ".venv", "__pycache__"]);
+
+/**
+ * C-2⁷, C-2⁹ (PRDR-279): the root's `archive/` holds the originals a pack was
+ * written from, and it is outside every discovery glob, the configured ones
+ * included. A pattern cannot express that (`**` reaches it), so the walk never
+ * enters it. Only the root's: a `docs/archive/` is an ordinary directory.
+ */
+const skipped = (prefix: string, name: string): boolean => SKIP_DIRS.has(name) || (prefix === "" && name === ARCHIVE_DIR);
 
 export interface DocDiscovery {
   /** Repo-relative POSIX paths, sorted — byte-identical across runs (C-2/N-2). */
@@ -58,7 +79,7 @@ export function discoverDocs(root: string, patterns: readonly string[] = DOC_PAT
       return;
     }
     for (const name of entries.sort()) {
-      if (SKIP_DIRS.has(name)) continue;
+      if (skipped(prefix, name)) continue;
       const abs = path.join(dir, name);
       const rel = prefix === "" ? name : `${prefix}/${name}`;
       let stats;

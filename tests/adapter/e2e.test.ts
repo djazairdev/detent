@@ -14,6 +14,7 @@ import { EXIT_NOT_READY, EXIT_OK, verifySync } from "../../src/cli/verify.js";
 import { initLayout, stateDir } from "../../src/fs/layout.js";
 import type { Binding } from "../../src/schemas/records.js";
 import { removeTree, tmpTree, writeTree } from "../helpers.js";
+import { SCHEMA_VERSION } from "../../src/schemas/common.js";
 
 /**
  * T-030 — the M1 exit: the full adapter flow, discover → execute → approve →
@@ -121,6 +122,7 @@ interface E2EResult {
   readonly detentFiles: readonly string[];
   readonly gitignore: string;
   readonly bindingsJson: string;
+  readonly approvals: string;
 }
 
 const results = new Map<string, E2EResult>();
@@ -143,7 +145,7 @@ async function runE2E(plan: FixturePlan): Promise<E2EResult> {
   expect(detectWorkspace(gatherFacts(root))).toBeNull();
 
   /** --- execute + approve (V-1: every candidate runs before approval) -------- */
-  const report = await bindAll(discover(root), { root, timeoutMs: PROBE_TIMEOUT_MS });
+  const report = await bindAll(discover(root), { root, timeoutMs: PROBE_TIMEOUT_MS , redact: (t) => t });
   const bindings: Binding[] = [...report.bindings];
 
   if (plan.choose === undefined) {
@@ -252,6 +254,7 @@ async function runE2E(plan: FixturePlan): Promise<E2EResult> {
     detentFiles: walkFiles(stateDir(root)),
     gitignore: readFileSync(path.join(stateDir(root), ".gitignore"), "utf8"),
     bindingsJson: readFileSync(path.join(stateDir(root), "bindings.json"), "utf8"),
+    approvals: readFileSync(path.join(stateDir(root), "state", "approvals.jsonl"), "utf8"),
   };
   results.set(plan.fixture, result);
   return result;
@@ -285,8 +288,31 @@ describe("T-030 bindings-only diffs between fixtures", () => {
   it("the .detent/ trees are structurally identical — same files, same .gitignore bytes", () => {
     const done = pairs();
     for (const r of done) {
-      expect(r.detentFiles).toEqual([".gitignore", "bindings.json"]);
+      /* V-3⁵ (PRDR-231): binding also records what it approved, in the local state the .gitignore already covers. */
+      expect(r.detentFiles).toEqual([".gitignore", "bindings.json", "state/approvals.jsonl"]);
       expect(r.gitignore).toBe(done[0]!.gitignore);
+    }
+  });
+
+  it("every ecosystem records its approvals, one row per bound slot, and none of it is committed (V-3⁵)", () => {
+    for (const r of pairs()) {
+      const rows = r.approvals.trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+      const bound = (JSON.parse(r.bindingsJson) as { bindings: { slot: string; config_hash: string }[] }).bindings;
+      /*
+       * Append-only, and superseded rows are kept on purpose: a flow that binds,
+       * writes, re-binds and writes again records both configurations, and the
+       * earlier one is exactly what lets a worktree cut before the change still
+       * be judged (V-3⁵). What must hold is that every CURRENT binding is
+       * recorded — an approval the ledger does not know is one V-3⁵ will refuse.
+       */
+      expect(rows.length).toBeGreaterThanOrEqual(bound.length);
+      for (const binding of bound) {
+        expect(
+          rows.some((row) => row["slot"] === binding.slot && row["config_hash"] === binding.config_hash),
+          `${binding.slot} was approved without being recorded`,
+        ).toBe(true);
+      }
+      expect(r.gitignore, "the ledger lives under the local state the .gitignore already covers").toContain("state");
     }
   });
 
@@ -294,8 +320,8 @@ describe("T-030 bindings-only diffs between fixtures", () => {
     const done = pairs();
     for (const r of done) {
       const parsed = JSON.parse(r.bindingsJson) as Record<string, unknown>;
-      expect(Object.keys(parsed).sort()).toEqual(["bindings", "schema_version", "skips"]);
-      expect(parsed["schema_version"]).toBe(1);
+      expect(Object.keys(parsed).sort()).toEqual(["bindings", "packages", "schema_version", "skips"]);
+      expect(parsed["schema_version"]).toBe(SCHEMA_VERSION);
     }
     /** Pairwise distinct: the ecosystem lives in the values, nowhere else. */
     for (let i = 0; i < done.length; i += 1) {

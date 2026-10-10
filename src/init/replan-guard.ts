@@ -1,0 +1,164 @@
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import path from "node:path";
+import { readCheckpoint } from "../fs/checkpoints.js";
+import { stateDir } from "../fs/layout.js";
+import { readAmendments } from "../kernel/amendment-store.js";
+import type { AmendmentRecord } from "../schemas/amendment.js";
+import { isClaimed, readTicket } from "../kernel/tickets/readers.js";
+import { ticketsDir } from "../kernel/tickets/paths.js";
+import { INIT_PHASES, type InitPhase } from "../schemas/init.js";
+import type { InitResult, PhaseHandler } from "./machine.js";
+
+/**
+ * C-8″ (PRDR-085, PRDR-118) — `init` does not re-plan while a ticket is in
+ * flight. Re-deriving under a ticket that is mid-ladder or claimed pulls the
+ * ground out from a running session: `writePlan` resets every drafted ticket
+ * to READY with fresh counters and deletes the ones the new plan does not name.
+ *
+ * The driver asks twice. Before any phase runs, a scan of the digests predicts
+ * whether PLAN would re-execute, so the refusal comes before any model spend.
+ * Then, as each phase on the chain up to PLAN is about to run, it asks again
+ * (PRDR-282): a standalone phase runs before the planning phases and can
+ * change what they read, as DECIDE does when it writes the decision log, and
+ * the scan could not see that coming. A phase before one that restarts the
+ * chain is not asked, since its re-run replays nothing past that phase
+ * (C-2¹³, PRDR-283): WRITE's re-run is not, since VALIDATE restarts the chain
+ * after it, and VALIDATE's is (C-2¹⁴, PRDR-284).
+ */
+
+/**
+ * PRDR-085: tickets a replan must not pull the ground out from under. Read
+ * defensively — an unparseable ticket file is a problem, but it is not
+ * evidence of a live session, and this guard must not be the thing that
+ * crashes on it.
+ */
+export function inFlightTickets(root: string, scope?: SliceScope): string[] {
+  const dir = ticketsDir(root);
+  if (!existsSync(dir)) return [];
+  const found: string[] = [];
+  for (const file of readdirSync(dir)) {
+    if (!file.endsWith(".json") || file === "plan.json" || file === "approval.json") continue;
+    const id = file.slice(0, -".json".length);
+    if (scope !== undefined && !scope.only.has(id)) continue;
+    if (isClaimed(root, id)) {
+      found.push(`${id} (claimed)`);
+      continue;
+    }
+    try {
+      const state = readTicket(root, id).state;
+      if (state !== "DONE" && state !== "READY" && !(state === "NEEDS_HUMAN" && scope?.exempt.has(id) === true)) found.push(`${id} (${state})`);
+    } catch {
+      /* unparseable: surfaced by the phases that actually consume it */
+    }
+  }
+  return found;
+}
+
+/**
+ * C-8⁵ (PRDR-286) — the guard an amendment's re-plan asks, slice by slice.
+ *
+ * An amendment applied to the pack asks `init` for the re-plan of the slices
+ * it changed, on an approved plan too, and the in-flight guard narrows to
+ * them: PLAN asks it of each slice it is about to plan again, before any
+ * session runs, and a slice it reuses keeps its tickets as they stand. The
+ * ticket an applied amendment filed waits in NEEDS_HUMAN for exactly this
+ * re-plan, so it does not refuse it (X-4⁸).
+ */
+export interface SliceScope {
+  readonly only: ReadonlySet<string>;
+  readonly exempt: ReadonlySet<string>;
+}
+
+/** The amendments applied to the pack and not yet re-planned. */
+export const awaitingReplan = (root: string): AmendmentRecord[] => readAmendments(root).filter((a) => a.status === "applied");
+
+/** Slice `id`'s tickets in the plan as written, and the filing tickets the re-plan does not refuse on. */
+export function sliceScope(root: string, id: string): SliceScope {
+  let written: readonly string[] = [];
+  try {
+    const plan = JSON.parse(readFileSync(path.join(stateDir(root), "plan", "plan.json"), "utf8")) as { slices?: { id?: unknown; tickets?: unknown }[] };
+    const tickets = plan.slices?.find((s) => s.id === id)?.tickets;
+    if (Array.isArray(tickets)) written = tickets.filter((t): t is string => typeof t === "string");
+  } catch {
+    /* no plan written yet: the slice has no tickets to pull the ground from */
+  }
+  return { only: new Set(written), exempt: new Set(awaitingReplan(root).map((a) => a.ticket)) };
+}
+
+/** PLAN met a slice it may not re-plan: some of its tickets are in flight. */
+export class SliceInFlightError extends Error {
+  constructor(readonly tickets: readonly string[]) {
+    super(`re-planning refused: ${tickets.join(", ")} still in flight`);
+    this.name = "SliceInFlightError";
+  }
+}
+
+/**
+ * Whether a phase on the chain re-plans by running: PLAN, and every phase whose
+ * re-run replays into it. A re-run stops replaying at a phase that restarts the
+ * chain (C-2¹³), so a phase before one re-plans nothing by running, and the
+ * phase that restarts it asks for itself.
+ */
+export function replansAt(phase: InitPhase, handlers: readonly PhaseHandler[]): boolean {
+  const at = INIT_PHASES.indexOf(phase);
+  const plan = INIT_PHASES.indexOf("PLAN");
+  if (at > plan) return false;
+  return !handlers.some((h) => h.restartsChain === true && INIT_PHASES.indexOf(h.phase) > at && INIT_PHASES.indexOf(h.phase) <= plan);
+}
+
+/**
+ * Whether PLAN would re-execute on this invocation — i.e. whether some phase
+ * at or before it has drifted. Digests are pure reads, so this costs nothing
+ * and spends nothing; it is the same walk the driver does below.
+ *
+ * A miss replays every phase after it, and none of them can be read, since
+ * the phase that missed left no outputs to digest them by (P9). The walk goes
+ * on past them to a phase that restarts the chain (C-2¹³), whose digest reads
+ * the disk alone: if its key stands, the chain resumes there.
+ */
+export function wouldReplan(root: string, handlers: readonly PhaseHandler[], now: () => number): boolean {
+  let carried = "";
+  let missed = false;
+  const outputs: Record<string, Record<string, unknown>> = {};
+  for (const phase of INIT_PHASES) {
+    const handler = handlers.find((h) => h.phase === phase);
+    if (handler === undefined) continue;
+    /* C-2¹¹: a standalone phase re-runs no other, PLAN included, whatever its own checkpoint says. */
+    if (handler.standalone === true) continue;
+    const restarts = handler.restartsChain === true;
+    if (!missed || restarts) {
+      let hash: string;
+      try {
+        hash = createHash("sha256").update(`${restarts ? "" : carried}\0${phase}\0${handler.digest({ root, outputs, now })}`).digest("hex");
+      } catch {
+        /* A digest that cannot be computed is drift by definition. */
+        return true;
+      }
+      carried = hash;
+      const read = readCheckpoint(root, phase, hash);
+      const fresh = read.status === "fresh" && handler.outputIntact?.({ root, outputs, now }) !== false;
+      if (fresh) outputs[phase] = { ...read.checkpoint.outputs };
+      missed = !fresh;
+    }
+    if (phase === "PLAN") return missed;
+  }
+  return missed;
+}
+
+/** What the run did before the refusal: nothing, at the first ask; at the second, what ran and what was reused. */
+export type Progress = Pick<InitResult, "reachedPhase" | "replayedFrom" | "executed" | "reused" | "outputs">;
+
+const NOTHING: Progress = { reachedPhase: "PLAN", replayedFrom: null, executed: [], reused: [], outputs: {} };
+
+/** The refusal, at either ask, with what ran before it; nothing after it runs. */
+export function replanRefusal(inFlight: readonly string[], replan: boolean, so: Progress = NOTHING): InitResult {
+  return {
+    exitCode: 2,
+    ...so,
+    messages: [
+      `${replan ? "--replan" : "re-planning"} refused: ${inFlight.join(", ")} still in flight. ` +
+        "Let the run finish or resolve them (detent status), then plan again.",
+    ],
+  };
+}

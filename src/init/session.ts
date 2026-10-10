@@ -1,6 +1,7 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
-import { type RoleId } from "../schemas/roles.js";
+import { ARCHIVE_DIR } from "../schemas/pack.js";
+import { effortFor, promptOf, SCRATCH_ROLES, type RoleId } from "../schemas/roles.js";
 import {
   artifactWriteRule,
   stablePrefix,
@@ -10,38 +11,93 @@ import {
   type SessionSpec,
 } from "../sessions/backend.js";
 import { toolsForRole } from "../sessions/guard.js";
+import { SCRATCH_TOOL, type ScratchGrant } from "../sessions/sandbox.js";
+import type { InitPhase } from "../schemas/init.js";
+import { STRUCTURAL_PROTECTED } from "../schemas/common.js";
 import { RunJournal } from "../kernel/journal.js";
-import { SpendLedger } from "../kernel/ledger.js";
+import { SpendLedger, type ProgressBreaker } from "../kernel/ledger.js";
+import { MAX_RESET_WAIT_MS, OUTAGE_BACKOFF_MS, conversationToResume, isOutage, isUsageLimit, outageWait } from "../schemas/backend-limit.js";
+import { scrub } from "../kernel/scrub.js";
+import { effortDowngrade, modelFallback, settledLevels } from "../kernel/session-effort.js";
+import { cacheLifetime } from "../schemas/cache-lifetime.js";
 
 /** Init has no ticket; this names the pipeline in the ledger and journal. */
-const INIT_TICKET = "init";
+export const INIT_TICKET = "init";
 
 /**
  * Session launching for the `init` pipeline.
  *
  * Simpler than the run loop's: init has no ticket and no per-generation
  * counters, so X-1's per-ticket session count — scoped to ticket/generation —
- * has no meaning here, and C-3a's tool-call ceiling budgets research instead.
- * What it keeps is S-1's role discipline (S-1′: the read-only surface plus one
- * scoped rule for its own artifact) and S-6's stable prefix.
+ * has no meaning here. What it keeps is S-1's role discipline (S-1′: the
+ * read-only surface plus one scoped rule for its own artifact) and S-6's
+ * stable prefix.
  *
  * PRDR-088: what it ALSO keeps is the money. An earlier note here claimed
  * there was "nothing to charge" — false, and the hole it left was real:
- * ANALYZE, PLAN, REVIEW_PLAN and planning research are billable sessions, so
- * leaving them off the ledger meant `run_spend_usd` did not bound them (P6)
- * and a failed phase left nothing to diagnose. Every launch now passes the
- * D-25 gate, records an S-4 row, and journals its start and end.
+ * ANALYZE, PLAN, REVIEW_PLAN and planning research were billable sessions, so
+ * leaving them off the ledger left their spend out of `run_spend_usd` (P6)
+ * and a failed phase left nothing to diagnose. Every launch now records an
+ * S-4 row and journals its start and end, and its spend is read at launch
+ * against X-1's advisory total and the no-progress breaker (D-25), which
+ * announce and refuse nothing (PRDR-265).
  */
 
 export interface InitSessionDeps {
   readonly root: string;
   readonly backend: SessionBackend;
   readonly prompts: PromptSet;
-  /** PRDR-088: X-1's run ceiling — init spend counts against it like any other. */
+  /** PRDR-088: X-1's advisory total, which init's spend counts toward like any other and which only announces (PRDR-265). */
   readonly spendCeiling: number;
+  /**
+   * X-1⁵ (PRDR-191): the no-progress breaker's two ceilings.
+   *
+   * Optional so existing callers keep compiling, but `pipeline.ts` supplies it:
+   * without this the breaker read its schema defaults while the project's
+   * config said otherwise — implemented, unit-tested and unreachable, which is
+   * PRDR-141's shape and was caught here by three tests staying silent.
+   */
+  readonly progressBreaker?: ProgressBreaker;
+  /** PRDR-114: the config's `model_routing`; every init session runs on its role's routed model. */
+  readonly modelRouting?: Readonly<Record<string, string>>;
+  /** PRDR-197: the config's `effort_routing`, resolved per role like the model above. */
+  readonly effortRouting?: Readonly<Record<string, string>>;
   readonly rulesText?: string;
+  /** PRDR-185: injectable wait for the outage backoff; real time by default. */
+  readonly sleep?: (ms: number) => Promise<void>;
+  /**
+   * PRDR-189: the clock the reset is measured against. AGENTS.md requires an
+   * injectable seam wherever a decision reads the time, and "how long until the
+   * limit resets" is a decision. N-5⁗ (PRDR-325): and the one a session's
+   * length on its ledger row is read from, which a later estimate uses.
+   */
+  readonly now?: () => Date;
+  /** PRDR-185: what an operator is told while init waits out a backend outage. */
+  readonly note?: (text: string) => void;
   /** X-6/S-3 docs domains for research-capable init sessions. */
   readonly docsDomains?: readonly string[];
+  /**
+   * PRDR-203: the run journal, opened ONCE by whoever owns the phase and handed
+   * to every launch in it.
+   *
+   * `launchOnce` used to open its own per launch and close it on the way out.
+   * That is the same thing for as long as launches never overlap, and a refusal
+   * the moment two do: `RunJournal.open` keeps an in-process set of roots —
+   * F-1's single writer — so the second launch in flight threw
+   * `JournalContendedError` before any session started. A root's one writer is
+   * the PROCESS, which the lock decides; the run loop has opened one journal per
+   * run since `kernel/run.ts` existed, and init now matches it (ARCH-2). Required,
+   * not defaulted: a launch that could open its own would be the old behaviour
+   * with a new name.
+   */
+  readonly journal: RunJournal;
+  /**
+   * C-7‴ (PRDR-296): the phase whose sessions these are, recorded on each
+   * one's ledger row so PRESENT can say what every specification phase and
+   * planning cost (decision 16). `sessionDeps` sets it for every phase that
+   * launches one.
+   */
+  readonly phase?: InitPhase;
 }
 
 export interface InitSessionRequest {
@@ -49,21 +105,74 @@ export interface InitSessionRequest {
   readonly inputs: Record<string, unknown>;
   /** Absolute path the session writes its artifact to. */
   readonly artifactOut: string;
-  /** C-3a: research capability for planning questions. */
-  readonly withWeb?: boolean;
+  /**
+   * S-1‴ (PRDR-283): the paths beyond its artifact the session may write, as
+   * globs, declared as an implement session's surface is. It gets Edit and
+   * Write for them, and the hook confines both to the surface. Absent, the
+   * session writes its artifact alone (S-1′).
+   */
+  readonly surface?: readonly string[];
+  /**
+   * S-1⁗ (PRDR-285): a VALIDATE reviewer's round scratch directory. The
+   * session gets the one tool that runs a script there, sandboxed, and no
+   * other role may be given it (`SCRATCH_ROLES`).
+   */
+  readonly scratch?: ScratchGrant;
+  /** S-6‴: the system prompt every session of its kind shares, a VALIDATE round's foundations; absent, the SDK's own. */
+  readonly systemPrompt?: string;
 }
 
+/**
+ * PRDR-203: one journal for a phase — opened before its first launch, closed
+ * after its last, handed to every launch between. The shape `kernel/run.ts`
+ * has always had for a run.
+ */
+export async function withInitJournal<T>(root: string, body: (journal: RunJournal) => Promise<T>): Promise<T> {
+  const journal = RunJournal.open(root);
+  try {
+    return await body(journal);
+  } finally {
+    journal.close();
+  }
+}
+
+/**
+ * C-4⁵ (PRDR-292): all a planning session has. It reads, and writes its
+ * artifact through the one rule below; it runs nothing and spawns nothing
+ * (D-28″). The planning audit counted 2,846 read-only Bash calls and 97
+ * attempts at a subagent in planner sessions whose allowlist named neither.
+ */
+const PLANNER_TOOLS: readonly string[] = ["Read", "Grep", "Glob", "Write"];
+
+/** C-4⁵, C-4⁸ (PRDR-292, PRDR-294): the roles that plan, the drafter's and the review's, which a planning session's limits bind. */
+const PLANNING_ROLES: ReadonlySet<RoleId> = new Set<RoleId>(["planner", "plan_review"]);
+
+/**
+ * S-6″ (PRDR-320): the task an init session's inputs name, which with its role
+ * is its kind. Planning's sessions name a `stage` instead, and no stage has
+ * five minutes, so they get one hour; a five-minute kind is a `task` init
+ * sends, which `tests/init/session-cache.test.ts` reads from the source.
+ */
+function taskOf(inputs: Readonly<Record<string, unknown>>): string | undefined {
+  const named = inputs["task"];
+  return typeof named === "string" ? named : undefined;
+}
+
+/** The spec's `effort`, absent where nothing routes one, so the SDK's own default applies. */
+const effortOption = (level: string | undefined): { readonly effort?: string } => (level === undefined ? {} : { effort: level });
+
 function initSessionSpec(deps: InitSessionDeps, request: InitSessionRequest): SessionSpec {
-  const preamble = JSON.stringify(
-    { phase: "init", non_negotiables: "Only artifacts count. Write exactly the artifact named below (P2)." },
-    null,
-    2,
-  );
+  /* C-4⁵ (PRDR-292): no Detent PRD id in what a model reads; the prompts name none either. */
+  const preamble = JSON.stringify({ phase: "init", non_negotiables: "Only artifacts count. Write exactly the artifact named below." }, null, 2);
+  /* C-2⁷, C-4⁵ (PRDR-279, PRDR-292): the originals a pack was written from, which planning never reads. */
+  const archive = path.join(deps.root, ARCHIVE_DIR);
+  const planning = PLANNING_ROLES.has(request.role);
   return {
     role: request.role,
     /* No ticket exists during init; the id names the pipeline for the journal. */
     ticketId: INIT_TICKET,
-    promptPrefix: stablePrefix(deps.prompts.prompts[request.role], deps.rulesText ?? "(no rules file)", preamble),
+    /* C-4⁵ (PRDR-292): a planner session reads its job's prompt, SLICE's or PLAN's; the review reads its role's own (C-4⁸). */
+    promptPrefix: stablePrefix(deps.prompts.prompts[promptOf(request.role, request.inputs["stage"])], deps.rulesText ?? "(no rules file)", preamble),
     promptVariable: JSON.stringify({ inputs: request.inputs, artifact_out: request.artifactOut }, null, 2),
     cwd: deps.root,
     artifactOut: request.artifactOut,
@@ -71,43 +180,204 @@ function initSessionSpec(deps: InitSessionDeps, request: InitSessionRequest): Se
      * S-1′ (PRDR-067): the read-only surface plus exactly one write rule —
      * the session's own artifact. Plan mode would deny the write the
      * C-3/A-contract demands; read-only-ness is the allowlist plus the hook.
+     * A session that declares a surface (S-1‴, PRDR-283: WRITE's) also gets
+     * Edit and Write, and the hook below confines them to it. A reviewer
+     * given its round's scratch directory (S-1⁗) gets the tool that runs a
+     * script there; the script writes nothing the hook sees, and the sandbox
+     * confines it instead.
      */
     allowedTools: [
-      ...(request.withWeb === true
-        ? toolsForRole("research", deps.docsDomains ?? [])
-        : toolsForRole(request.role, deps.docsDomains ?? [])),
+      ...toolsForRole(request.role, deps.docsDomains ?? []),
+      ...(request.surface === undefined ? [] : ["Edit", "Write"]),
+      ...(request.scratch === undefined ? [] : [SCRATCH_TOOL]),
       artifactWriteRule(request.artifactOut),
     ],
+    ...(planning ? { tools: PLANNER_TOOLS } : {}),
     permissionMode: "",
-    model: "",
+    model: deps.modelRouting?.[request.role] ?? "",
+    ...effortOption(effortFor(deps.effortRouting ?? {}, request.role, taskOf(request.inputs))),
+    /** S-6″ (PRDR-320): the cache lifetime of the session's kind, its role and the task its inputs name. */
+    cacheTtl: cacheLifetime(request.role, taskOf(request.inputs)),
+    ...(request.scratch === undefined ? {} : { scratch: request.scratch }),
+    ...(request.systemPrompt === undefined ? {} : { systemPrompt: request.systemPrompt }),
+    /**
+     * S-1″ (PRDR-124): the per-session containment policy, so the one write
+     * rule above is TRUE rather than merely stated.
+     *
+     * The allowlist granted exactly `Write(<artifact>)`, but the backend's
+     * construction policy — the fallback the hook uses when a spec carries
+     * none — was `surface: ["**"]`. A mutating call the guard clears returns
+     * `allow`, which is terminal in the SDK's permission order, so the
+     * allowlist was never consulted and a planner could write anywhere in the
+     * repository. It did: asked for one artifact, it wrote its draft as
+     * `state/plan/<slice>-part1.json` and `-part2.json`, and the phase then
+     * found no artifact where it was told one would be.
+     *
+     * Reads are unaffected — non-mutating calls abstain (S-2‴) and `Read` is
+     * allowlisted — so the surface here governs writes alone, which is exactly
+     * what S-1′ always claimed.
+     */
+    policy: {
+      surface: [path.relative(deps.root, request.artifactOut).split(path.sep).join("/"), ...(request.surface ?? [])],
+      /** SEC-3′ (PRDR-132): the same structural floor the run loop enforces, `.git/**` included. */
+      protectedGlobs: [...STRUCTURAL_PROTECTED],
+      workRoot: deps.root,
+      /**
+       * SEC-3 (PRDR-184): the session's own artifact, exempt from the floor
+       * that would otherwise refuse it.
+       *
+       * ANALYZE's artifact was `.detent/state/analysis.json`, and PRDR-149 added
+       * `.detent/state/**` to `STRUCTURAL_PROTECTED` — correctly, it holds the
+       * checkpoints and the run lock. Protected globs are consulted before the
+       * surface, so from that moment every init session was DENIED the one
+       * write it exists to make, and `init` died at ANALYZE with "produced no
+       * analysis artifact". Found by a live run, and by nothing else: every
+       * init test uses `MockBackend`, which writes artifacts with `fs` and
+       * never runs the guard (PRDR-182 says so in as many words).
+       *
+       * The FILE, not its directory — `path.relative(file, file)` is `""` so
+       * the exact path is allowed, while a sibling resolves to `../other.json`
+       * and falls through to the floor. `.detent/state/` keeps every other
+       * checkpoint immutable to the session.
+       */
+      artifactRoot: request.artifactOut,
+      /**
+       * C-4⁵ (PRDR-292): discovery keeps the originals out of a planning
+       * session's inputs (PRDR-279), and this keeps them out of its tools'
+       * reach, the review's as the drafter's (C-4⁸).
+       */
+      ...(planning && existsSync(archive) ? { unreadable: [archive] } : {}),
+    },
   };
 }
 
 export async function launchInitSession(deps: InitSessionDeps, request: InitSessionRequest): Promise<SessionResult> {
+  /* S-1⁗ (PRDR-285): refused before anything is gated, charged or journaled, so no session starts with it. */
+  if (request.scratch !== undefined && !SCRATCH_ROLES.has(request.role)) {
+    throw new Error(`a ${request.role} session was given a scratch directory, and only ${[...SCRATCH_ROLES].join(", ")} may run scripts (S-1‴, S-1⁗)`);
+  }
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  /** X-8″ (PRDR-321): the conversation the next attempt carries on, when a usage limit stopped one that held work. */
+  let resume: string | undefined;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await launchOnce(deps, request, resume);
+    } catch (err) {
+      const message = (err as Error).message;
+      /**
+       * PRDR-189: the stated reset wins over the ladder.
+       *
+       * A usage limit is not a transient outage — 1/5/15 minutes exhausted
+       * against one that reset hours later, and the run died having behaved
+       * correctly at every step. When the message says when it comes back, that
+       * is the wait; the ladder remains for outages that say nothing.
+       */
+      const wait = isOutage(message) ? outageWait(message, attempt, deps.now?.()) : null;
+      if (wait === null) throw err;
+      if (wait.kind === "too_long") {
+        throw new Error(
+          `${message} — it resets in ${String(Math.round(wait.ms / 60_000))} min, longer than this will wait ` +
+            `(${String(MAX_RESET_WAIT_MS / 60_000)} min). Re-run when the window has reset; every finished slice and redraft is checkpointed.`,
+        );
+      }
+      /**
+       * X-8″ (PRDR-321): what was done is carried on, not done again. A session
+       * a usage limit stopped after its first turn is resumed with its own
+       * conversation once the wait is over; before PRDR-321 it was launched
+       * afresh and paid for its thinking, its tool calls and its cache twice.
+       */
+      const failed = err instanceof InitSessionFailed ? err.result : null;
+      resume = failed === null ? undefined : conversationToResume(failed, isUsageLimit(message));
+      const next =
+        resume !== undefined
+          ? `; session ${resume} resumes where it stopped`
+          : failed !== null && isUsageLimit(message)
+            ? failed.sessionId === undefined
+              ? "; no session id arrived, so it is launched afresh"
+              : "; it stopped before its first turn, so it is launched afresh"
+            : "";
+      const mins = String(Math.round(wait.ms / 60_000));
+      const step = `(${String(attempt + 1)}/${String(OUTAGE_BACKOFF_MS.length)})`;
+      deps.note?.(
+        wait.kind === "ladder"
+          ? `backend outage during ${request.role} — waiting ${mins} min before retrying${next} ${step}: ${message.slice(0, 160)}`
+          : `backend limit during ${request.role} — waiting ${mins} min for the stated reset, ${wait.resets}${next} ${step}: ${message.slice(0, 160)}`,
+      );
+      await sleep(wait.ms);
+    }
+  }
+}
+
+/**
+ * S-4⁵ (PRDR-299): the effort a session ran at, and the model it ran on,
+ * against what it was routed to, recorded as a kernel session's are (S-4⁗,
+ * PRDR-114). `init` has no ticket to note, so a disagreement is said through
+ * its note seam. Recorded before a failed session fails its phase, since the
+ * turns it ran were run at a level.
+ */
+function recordRan(deps: InitSessionDeps, role: string, routed: string, result: SessionResult): void {
+  const at = new Date().toISOString();
+  deps.journal.appendTicketEvent(INIT_TICKET, { stage: role, event: "effort_settled", at, ...settledLevels(routed, result.effort) });
+  const downgrade = effortDowngrade(role, routed, result.effort);
+  if (downgrade !== null) deps.note?.(downgrade);
+  if (result.modelFallback === undefined) return;
+  const { requested } = result.modelFallback;
+  /* SEC-4 (PRDR-169): a runtime string, echoed to the operator and the journal. */
+  const reason = scrub(result.modelFallback.reason);
+  deps.journal.appendTicketEvent(INIT_TICKET, { stage: role, event: "model_fallback", at, requested, reason });
+  deps.note?.(modelFallback(role, requested, reason));
+}
+
+/** X-8″ (PRDR-321): a session that failed, with what it returned, so a usage limit's stop can be resumed. */
+export class InitSessionFailed extends Error {
+  constructor(
+    message: string,
+    readonly result: SessionResult,
+  ) {
+    super(message);
+  }
+}
+
+async function launchOnce(deps: InitSessionDeps, request: InitSessionRequest, resume?: string): Promise<SessionResult> {
   mkdirSync(path.dirname(request.artifactOut), { recursive: true });
 
-  const journal = RunJournal.open(deps.root);
-  let result: SessionResult;
-  try {
-    const ledger = new SpendLedger(deps.root, journal, deps.spendCeiling);
-    /* D-25: the ceiling is a launch gate, evaluated here and never mid-flight. */
-    ledger.assertLaunchAllowed();
-    journal.appendTicketEvent(INIT_TICKET, { stage: request.role, event: "start", at: new Date().toISOString() });
-    result = await deps.backend.run(initSessionSpec(deps, request));
-    ledger.record(INIT_TICKET, 0, request.role, result, new Date().toISOString());
-    journal.appendTicketEvent(INIT_TICKET, {
-      stage: request.role,
-      event: "end",
-      at: new Date().toISOString(),
-      ok: result.ok,
-      turns: result.turns,
-      cost: result.costEstimateUsd,
-      ...(result.crashed === true ? { partial: "crash" } : {}),
-      ...(result.rawTail === "" ? {} : { tail: result.rawTail.slice(-500) }),
-    });
-  } finally {
-    journal.close();
+  /* PRDR-203: the phase's journal, never this launch's own — see `InitSessionDeps.journal`. */
+  const journal = deps.journal;
+  const ledger =
+    deps.progressBreaker === undefined
+      ? new SpendLedger(deps.root, journal, deps.spendCeiling)
+      : new SpendLedger(deps.root, journal, deps.spendCeiling, deps.progressBreaker, deps.note);
+  /* D-25: spend is read here, at launch and never mid-flight; the advisory total and the breaker only announce (PRDR-265). */
+  ledger.recordLaunch();
+  /* S-4⁵ (PRDR-299): the level this session is routed to, `"default"` where none is, as the kernel's `start` names it (S-4‴); its task's own where the config routes one (S-5⁷). */
+  const routed = effortFor(deps.effortRouting ?? {}, request.role, taskOf(request.inputs)) ?? "default";
+  journal.appendTicketEvent(INIT_TICKET, {
+    stage: request.role,
+    event: "start",
+    at: new Date().toISOString(),
+    effort: routed,
+    ...(resume === undefined ? {} : { resumes: resume }),
+  });
+  const spec = initSessionSpec(deps, request);
+  const clock = deps.now ?? ((): Date => new Date());
+  const began = clock().getTime();
+  const result = await deps.backend.run(resume === undefined ? spec : { ...spec, resume: { sessionId: resume } });
+  const durationMs = clock().getTime() - began;
+  if (result.resume?.refused !== undefined) {
+    deps.note?.(`${request.role}: the runtime would not resume session ${result.resume.sessionId} (${scrub(result.resume.refused)}), so it was launched afresh (X-8″)`);
   }
+  recordRan(deps, request.role, routed, result);
+  ledger.record(INIT_TICKET, 0, request.role, result, new Date().toISOString(), { phase: deps.phase, task: taskOf(request.inputs), effort: routed, durationMs });
+  journal.appendTicketEvent(INIT_TICKET, {
+    stage: request.role,
+    event: "end",
+    at: new Date().toISOString(),
+    ok: result.ok,
+    turns: result.turns,
+    cost: result.costEstimateUsd,
+    ...(result.crashed === true ? { partial: "crash" } : {}),
+    ...(result.rawTail === "" ? {} : { tail: result.rawTail.slice(-500) }),
+  });
 
   if (!result.ok) {
     /*
@@ -115,8 +385,31 @@ export async function launchInitSession(deps: InitSessionDeps, request: InitSess
      * this, a crashed analyst (PRDR-053 wrap) surfaced as the misleading
      * "produced no analysis artifact".
      */
+    /**
+     * SEC-4 (PRDR-252): `rawTail` is the model's own final message, and this
+     * message reaches the operator's terminal and `init failed:` on stderr.
+     * `referee-session.ts` scrubs the identical value at the identical seam —
+     * "backend refused ${role} session ... (crashed, zero turns)" — and init,
+     * which has no fixture path and runs first, scrubbed none of it. A throw is
+     * the one place a seam cannot cover, so it is done here.
+     */
+    throw new InitSessionFailed(
+      `${request.role} session failed${result.rawTail === "" ? "" : `: ${scrub(result.rawTail.slice(-300))}`}`,
+      result,
+    );
+  }
+  /**
+   * S-4′ (PRDR-118): the same circuit breaker the run loop applies. A stream
+   * that ends with no result message parses as `is_error: undefined`, which
+   * reads as SUCCESS with no telemetry — so a session killed in transport
+   * returned ok, recorded $0 on the ledger, and its phase then reported
+   * "produced no artifact", blaming the model for a death on the wire. The
+   * run loop has caught this since T-046; init never looked.
+   */
+  if (!result.telemetryParsed) {
     throw new Error(
-      `${request.role} session failed${result.rawTail === "" ? "" : `: ${result.rawTail.slice(-300)}`}`,
+      `${request.role} session ended with no telemetry (S-4 circuit breaker) — the session died in transport rather than producing an artifact. ` +
+        "Its cost is not on the ledger, since the session reported none; re-run `detent init` to resume (C-8).",
     );
   }
   return result;

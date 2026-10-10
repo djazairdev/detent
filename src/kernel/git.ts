@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { LOCAL, STATE_DIR } from "../fs/layout.js";
 
 /**
  * T-042 — the branch & merge contract (B-1…B-5, D-8, P7).
@@ -18,14 +19,89 @@ const TICKET_TRAILER = "Detent-Ticket";
 /** B-1/D-20: history written before the rename keeps its trailer; readers accept both, permanently. */
 const LEGACY_TICKET_TRAILER = "Foreman-Ticket";
 
+/**
+ * P7′ (PRDR-130): `maxBuffer` is explicit. Node defaults `execFileSync` to 1 MB
+ * and throws ENOBUFS above it, so every git call in the kernel was silently
+ * capped at a number nobody chose — and a bootstrap ticket's diff, which
+ * carries the project's lockfile, routinely exceeds it.
+ */
+const GIT_MAX_BUFFER = 64 * 1024 * 1024;
+
 export function git(cwd: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: GIT_MAX_BUFFER });
 }
 
+/**
+ * PRDR-216: stage the tree for finalize without naming an ignored path.
+ *
+ * V-1⁗ excluded the install directory by pathspec — `git add -A -- . :!<dir>`
+ * — and git refuses a pathspec that names an ignored path even as an
+ * exclusion: "The following paths are ignored by one of your .gitignore
+ * files". gate-313's bootstrap wrote `node_modules/` into its own `.gitignore`,
+ * the referee's install created the directory, and finalize exited 1 with the
+ * ticket already DONE. A directory git already ignores is `-A`'s own skip and
+ * needs no pathspec; only one git does NOT ignore is excluded by name. Asked
+ * per directory, since a project may ignore some ecosystems and not others.
+ */
+export function isIgnored(cwd: string, rel: string): boolean {
+  try {
+    execFileSync("git", ["check-ignore", "-q", "--", rel], { cwd, stdio: "ignore" });
+    return true;
+  } catch {
+    /* Exit 1 is "not ignored"; anything else is a git that could not answer, and an explicit exclusion is the safe reading. */
+    return false;
+  }
+}
+
+/**
+ * PRDR-228: F-1's LOCAL set never joins a change set, whichever path wrote into
+ * it. A tree whose `.detent/` is untracked — gate-313's — has no
+ * `.detent/.gitignore` to hide a stray write, and `t-s01-007: finalize` staged
+ * a session artifact into the product. Named here, next to the install
+ * directory, and asked of git first for the same reason (V-1⁵).
+ */
+const LOCAL_STATE: readonly string[] = LOCAL.map((entry) => path.posix.join(STATE_DIR, entry.rel));
+
+/** PRDR-229: the symbol server's own project directory, written where the server is started — the worktree now — and never the change set's. */
+const TOOL_STATE: readonly string[] = [".serena"];
+
+export function stageAll(cwd: string, excludeDirs: readonly string[]): void {
+  const excludes = [...excludeDirs, ...LOCAL_STATE, ...TOOL_STATE].filter((dir) => !isIgnored(cwd, dir)).map((dir) => `:!${dir}`);
+  git(cwd, "add", "-A", "--", ".", ...excludes);
+}
+
+/** PRDR-228: commit what was STAGED — an excluded untracked path (run state) is dirty to `status` and must not force an empty commit. */
+export function commitStaged(cwd: string, excludeDirs: readonly string[], message: string): void {
+  stageAll(cwd, excludeDirs);
+  if (git(cwd, "diff", "--cached", "--name-only").trim() !== "") git(cwd, "commit", "-q", "-m", message);
+}
+
+/**
+ * P7′ (PRDR-130): did git RUN and merely answer non-zero, or could it not run
+ * at all? The two were one `null` and the difference is the whole defect: a
+ * failed spawn, a permissions error or an output overrun read as "found
+ * nothing", so the reviewer got an empty diff, B-4 minted no risk label, and
+ * the base guard treated every branch as newly created and deleted it.
+ *
+ * Verified shapes: a non-zero exit carries a numeric `status` and no `code`; a
+ * failure to run or to capture carries `status: null` and a string `code`
+ * (`ENOBUFS`, `ENOENT`). Only the first is an answer.
+ */
+export function gitCouldNotRun(err: unknown): boolean {
+  const e = err as { status?: unknown; code?: unknown };
+  return typeof e?.status !== "number";
+}
+
+/**
+ * `null` means git ran and said no. A call that could not run RAISES — its
+ * callers are asking a question about the repository, and silence is not an
+ * answer to it.
+ */
 function tryGit(cwd: string, ...args: string[]): string | null {
   try {
     return git(cwd, ...args);
-  } catch {
+  } catch (err) {
+    if (gitCouldNotRun(err)) throw err;
     return null;
   }
 }
@@ -72,15 +148,40 @@ export function ensureRunBranch(root: string, runId: string): RunBranch {
  * The current ticket is recorded inside `.git/` — run state, never the
  * project tree (F-2).
  */
-export function installTrailerHook(root: string): void {
+/** B-1′: how Detent recognises its own hook, so re-installing is idempotent. */
+const TRAILER_HOOK_MARKER = "# Written by Detent (B-1).";
+
+/**
+ * B-1′ (PRDR-146): returns the path a FOREIGN hook was preserved at, or null.
+ *
+ * This used to `writeFileSync` unconditionally, at the start of every run,
+ * destroying an operator's commit linting, signing or issue-tracker hook with
+ * nothing said and nothing kept. Detent's posture is that it discovers tooling
+ * and refuses to install it (D-4, F-2); silently replacing a user's git hook is
+ * that posture broken in the place they are least likely to look.
+ *
+ * Note this resolves `--git-common-dir`, so it writes into the MAIN repository
+ * even in worktree mode — per-ticket worktrees do not cover it.
+ */
+export function installTrailerHook(root: string): string | null {
   const gitDir = git(root, "rev-parse", "--git-common-dir").trim();
   const hooksDir = path.resolve(root, gitDir, "hooks");
   mkdirSync(hooksDir, { recursive: true });
   const hook = path.join(hooksDir, "prepare-commit-msg");
+
+  let preserved: string | null = null;
+  if (existsSync(hook) && !readFileSync(hook, "utf8").includes(TRAILER_HOOK_MARKER)) {
+    /* Never clobber an earlier rescue either: the first one is the operator's original. */
+    let backup = `${hook}.before-detent`;
+    for (let n = 2; existsSync(backup); n += 1) backup = `${hook}.before-detent.${n}`;
+    renameSync(hook, backup);
+    preserved = backup;
+  }
+
   writeFileSync(
     hook,
     `#!/bin/sh
-# Written by Detent (B-1). Appends the claimed ticket's trailer.
+${TRAILER_HOOK_MARKER} Appends the claimed ticket's trailer.
 marker="$(git rev-parse --git-common-dir)/DETENT_TICKET"
 [ -f "$marker" ] || exit 0
 tid="$(cat "$marker")"
@@ -89,6 +190,7 @@ grep -q "^${TICKET_TRAILER}: $tid$" "$1" || printf '\\n${TICKET_TRAILER}: %s\\n'
 `,
   );
   chmodSync(hook, 0o755);
+  return preserved;
 }
 
 export function markCurrentTicket(root: string, ticketId: string): void {
@@ -99,6 +201,35 @@ export function markCurrentTicket(root: string, ticketId: string): void {
 export function clearCurrentTicket(root: string): void {
   const gitDir = git(root, "rev-parse", "--git-common-dir").trim();
   rmSync(path.join(path.resolve(root, gitDir), "DETENT_TICKET"), { force: true });
+}
+
+/**
+ * X-4⁸ (PRDR-286): commit `paths` and nothing else, as no ticket's work, and
+ * return the commit. The operator's amendment to the pack is decided while
+ * the ticket that filed it may still hold its claim, so the claimed ticket's
+ * marker is set aside for the commit and put back: the hook would otherwise
+ * stamp that ticket's trailer on it, and the ticket's own work is what its
+ * trailer selects (PRDR-171). Other staged paths stay staged. Nothing to
+ * commit returns HEAD; a commit that fails leaves `paths` unstaged again.
+ */
+export function commitPaths(root: string, paths: readonly string[], message: string): string {
+  const marker = path.join(path.resolve(root, git(root, "rev-parse", "--git-common-dir").trim()), "DETENT_TICKET");
+  const held = existsSync(marker) ? readFileSync(marker, "utf8") : null;
+  rmSync(marker, { force: true });
+  try {
+    git(root, "add", "--", ...paths);
+    if (git(root, "diff", "--cached", "--name-only", "--", ...paths).trim() !== "") {
+      try {
+        git(root, "commit", "-q", "-m", message, "--only", "--", ...paths);
+      } catch (err) {
+        tryGit(root, "reset", "-q", "--", ...paths);
+        throw err;
+      }
+    }
+  } finally {
+    if (held !== null) writeFileSync(marker, held);
+  }
+  return git(root, "rev-parse", "HEAD").trim();
 }
 
 /**
@@ -172,7 +303,8 @@ export function enforceBaseGuard(root: string, snapshot: RefSnapshot, runBranch:
     const became = now.get(ref) ?? null;
     if (became !== was) {
       violations.push({ ref, was, became });
-      git(root, "update-ref", `refs/heads/${ref}`, was);
+      /* PRDR-159: labelled, so a person reading the reflog can see who moved it back. */
+      git(root, "update-ref", "-m", "detent: base guard restore", `refs/heads/${ref}`, was);
     }
   }
   /** A brand-new non-run branch created by a session is also a write. */
@@ -215,11 +347,47 @@ export function ensureWorktree(root: string, ticketId: string): string {
 }
 
 /** B-2: merged `--no-ff` into the RUN branch on DONE — never the base (P7). */
+export class WorktreeConflictError extends Error {
+  constructor(
+    readonly ticketId: string,
+    readonly conflicts: readonly string[],
+  ) {
+    super(
+      `merging ${ticketId} into the run branch conflicts${conflicts.length === 0 ? "" : ` in ${conflicts.join(", ")}`} — ` +
+        `the worktree and branch \`${TICKET_BRANCH_PREFIX}${ticketId}\` are kept for you to resolve, and the ticket ` +
+        "is not finalized. Nothing enforces surface disjointness, so two tickets can legitimately reach one file (A-1‴ " +
+        "reports the contention at plan time).",
+    );
+    this.name = "WorktreeConflictError";
+  }
+}
+
+/**
+ * B-2′ (PRDR-145a): a conflict is an OUTCOME, not a defect.
+ *
+ * This ran `git merge --no-ff` unguarded and then removed the worktree and
+ * deleted the branch unconditionally — so two tickets touching one file left
+ * the ticket DONE with its work unmerged, an orphaned worktree and a stale
+ * branch, surfacing as exit 1 from an unclassified throw. The cleanup now only
+ * happens when the merge did.
+ */
 export function mergeWorktree(root: string, ticketId: string): void {
   const wt = worktreePath(root, ticketId);
-  git(root, "merge", "--no-ff", "-q", "-m", `merge ${ticketId}`, `${TICKET_BRANCH_PREFIX}${ticketId}`);
+  const branch = `${TICKET_BRANCH_PREFIX}${ticketId}`;
+  try {
+    git(root, "merge", "--no-ff", "-q", "-m", `merge ${ticketId}`, branch);
+  } catch (err) {
+    if (gitCouldNotRun(err)) throw err;
+    const conflicts = (tryGit(root, "diff", "--name-only", "--diff-filter=U") ?? "")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l !== "");
+    /* Leave the run branch as it was; the worktree and its branch stay for a human. */
+    tryGit(root, "merge", "--abort");
+    throw new WorktreeConflictError(ticketId, conflicts);
+  }
   git(root, "worktree", "remove", "--force", wt);
-  tryGit(root, "branch", "-q", "-D", `${TICKET_BRANCH_PREFIX}${ticketId}`);
+  tryGit(root, "branch", "-q", "-D", branch);
 }
 
 /**
@@ -240,7 +408,17 @@ export function changedFiles(root: string, baseRef: string): string[] {
  * — the guard's own restore is honest evidence that a write happened).
  */
 export function baseReflogWrites(root: string, base: string): number {
-  const raw = tryGit(root, "reflog", "show", "--format=%gs", base);
+  /**
+   * PRDR-159: `%H`, not `%gs`.
+   *
+   * `git update-ref` without `-m` writes an entry whose MESSAGE is empty, and
+   * filtering empty lines — which was there to drop the trailing newline —
+   * dropped those entries with it. The guard's own restore is a bare
+   * `update-ref`, so the one write this metric's docstring is about counted as
+   * zero, and a base tampered with by `update-ref` alone reported untouched.
+   * Every entry has a commit hash; not every entry has a message.
+   */
+  const raw = tryGit(root, "reflog", "show", "--format=%H", base);
   if (raw === null) return 0;
   const entries = raw.split("\n").filter((l) => l.trim() !== "");
   return Math.max(0, entries.length - 1);
@@ -265,13 +443,42 @@ export function baseReflogWrites(root: string, base: string): number {
  */
 export function ticketCommits(cwd: string, ticketId: string, base: string | null): string[] {
   if (base === null) return [];
-  const raw = tryGit(cwd, "log", "--reverse", "--format=%H%x1f%s", `${base}..HEAD`);
+  /**
+   * PRDR-171: the TRAILER first, the subject prefix as a fallback.
+   *
+   * This selected on `subject.startsWith(\`${ticketId}:\`)` alone — a
+   * convention stated in prompt text and enforced nowhere, asked of a model
+   * three or four times per ticket across the fix ladder. Meanwhile
+   * `installTrailerHook` stamps `Detent-Ticket: <id>` onto every commit made
+   * under a claim, by a git hook that needs no cooperation, and
+   * `parseTicketTrailers` had ZERO production callers. A commit the session
+   * made correctly but forgot to prefix was absent from the diff the reviewer
+   * judges — not truncated, not flagged — and merged.
+   *
+   * `%B` rather than `%s`, so the body the trailer lives in is available.
+   *
+   * PRDR-179: `-z` and a NUL record separator, not `%x01`. The comment here
+   * claimed SOH was safe "because a commit body may contain anything" — which
+   * is exactly why it was not: a body containing a literal SOH split its own
+   * record and the commit was dropped silently, reproducing the harm PRDR-171
+   * exists to remove. Git refuses a NUL in a commit message outright ("a NUL
+   * byte in commit log message not allowed"), so a NUL separator is the one
+   * byte a body provably cannot contain.
+   *
+   * With `-z` git separates RECORDS with a single NUL and the format puts one
+   * between sha and body, so the stream is `sha\0body\0sha\0body\0` — read in
+   * pairs, not split on a double NUL.
+   */
+  const raw = tryGit(cwd, "log", "--reverse", "-z", "--format=%H%x00%B", `${base}..HEAD`);
   if (raw === null) return [];
+  const fields = raw.split("\0");
   const out: string[] = [];
-  for (const line of raw.split("\n")) {
-    const [sha, subject] = line.split("\x1f");
-    if (sha === undefined || subject === undefined || sha.trim() === "") continue;
-    if (subject.startsWith(`${ticketId}:`)) out.push(sha.trim());
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    const sha = fields[i];
+    if (sha === undefined || sha.trim() === "") continue;
+    const body = fields[i + 1] ?? "";
+    const subject = body.split("\n")[0] ?? "";
+    if (parseTicketTrailers(body).includes(ticketId) || subject.startsWith(`${ticketId}:`)) out.push(sha.trim());
   }
   return out;
 }
@@ -296,9 +503,22 @@ export function commitPatch(cwd: string, sha: string, spec: readonly string[]): 
  * itself mutates between commits, and clobbering ticket JSON would destroy
  * the very record resume depends on. Untracked files are left in place: the
  * gate judges the tree as-is.
+ *
+ * PRDR-214: only what HEAD HAS is reset — modified, deleted, type-changed.
+ * `git diff HEAD` also lists a staged addition, and `checkout HEAD --` cannot
+ * restore a path HEAD does not have: the call threw, and a resume of a
+ * generation that had staged a new file threw with it. Staged additions are
+ * the claim-time settle's (`unstageAdditions`), which runs before this.
+ *
+ * Audit of PRDR-214: `--no-renames`. Rename detection is on by default, so a
+ * staged rename read as one `R` — neither an addition for the settle nor a
+ * deletion for this reset — and the old path stayed missing. Read raw, it is
+ * an `A` the settle unstages and a `D` this restores.
+
  */
 export function resetDirtyTracked(cwd: string): string[] {
-  const raw = tryGit(cwd, "diff", "--name-only", "HEAD");
+  const raw = tryGit(cwd, "diff", "--name-only", "--no-renames", "--diff-filter=MDT", "HEAD");
+
   if (raw === null || raw.trim() === "") return [];
   const dirty = raw
     .split("\n")

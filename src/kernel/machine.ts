@@ -51,16 +51,69 @@ function key(state: State, event: Event): string {
   return `${state}|${event}`;
 }
 
+/**
+ * X-8/C-12 (PRDR-238): the states a human may restart the current attempt from
+ * — ONE definition, read by the table below and by `requeueTicket`'s own check,
+ * which used to carry a second copy of the pair and could drift from it.
+ *
+ * A requeue was admissible only from NEEDS_HUMAN and BLOCKED, which was right
+ * when PRDR-078 built these verbs for a HALTED ticket and never revisited once
+ * crash-resume existed — a crash does not leave a ticket halted, it leaves it
+ * mid-flight. So a session killed mid-implement left its ticket IN_PROGRESS,
+ * where B-5's skip then sent an unwritten implementation down the whole ladder —
+ * a blind fix, a research session, an informed fix — before NEEDS_HUMAN made the
+ * remedy reachable. The documented cure was gated behind the failure it exists
+ * to short-circuit; a machine restart during gate-313's take 15 stranded two
+ * tickets that way at once.
+ *
+ * APPROVED is deliberately absent: its diff passed the authoritative gate and a
+ * review, finalize is mechanical from there, and a requeue would discard
+ * verified work on a keystroke — `approve` is the verb for re-examining it.
+ * DONE is merged; READY is already what a requeue produces.
+ *
+ * Widening this set is safe only because `guardClaim` does not move with it: a
+ * claim held by a LIVE process still refuses, naming the pid, so a requeue can
+ * never pull a ticket out from under a running session (PRDR-079).
+ */
+export const REQUEUEABLE: readonly State[] = [
+  "DIAGNOSED",
+  "IN_PROGRESS",
+  "BLIND_FIX",
+  "RESEARCH",
+  "INFORMED_FIX",
+  "REVIEW_FIX",
+  "IN_REVIEW",
+  "NEEDS_HUMAN",
+  "BLOCKED",
+];
+
 const rows: ReadonlyArray<readonly [State, Event, Row]> = [
   ["READY", "CLAIMED", guard("claimed")],
   ["DIAGNOSED", "REPRO_AS_PREDICTED", to("IN_PROGRESS")],
   ["DIAGNOSED", "REPRO_WRONG", guard("reproWrong")],
   ["IN_PROGRESS", "PREMISE_FALSIFIED", guard("premiseFalsified")],
   /*
+   * X-3′ (PRDR-289): a fix session may find the premise false as an
+   * implementer may, and it means the same there. Review, diagnose and
+   * research stay read-only (specification decision 12).
+   */
+  ["BLIND_FIX", "PREMISE_FALSIFIED", guard("premiseFalsified")],
+  ["INFORMED_FIX", "PREMISE_FALSIFIED", guard("premiseFalsified")],
+  ["REVIEW_FIX", "PREMISE_FALSIFIED", guard("premiseFalsified")],
+  /*
    * X-4′ (PRDR-111): a falsification naming a path another ticket owns is a
    * dependency, not a stop — the ticket returns to the pool and waits for it.
    */
   ["IN_PROGRESS", "DEPENDENCY_DISCOVERED", to("READY")],
+  ["BLIND_FIX", "DEPENDENCY_DISCOVERED", to("READY")],
+  ["INFORMED_FIX", "DEPENDENCY_DISCOVERED", to("READY")],
+  ["REVIEW_FIX", "DEPENDENCY_DISCOVERED", to("READY")],
+  /*
+   * X-4″ (PRDR-102): a ticket the session judged larger than one session is a
+   * plan-level finding, like a false premise — a human's, with the proposal
+   * attached. No rung can make a ticket smaller.
+   */
+  ["IN_PROGRESS", "TICKET_OVERSIZED", to("NEEDS_HUMAN")],
 
   ["IN_PROGRESS", "GATE_GREEN", to("IN_REVIEW")],
   ["BLIND_FIX", "GATE_GREEN", to("IN_REVIEW")],
@@ -94,8 +147,11 @@ const rows: ReadonlyArray<readonly [State, Event, Row]> = [
   ["APPROVED", "RISK_LABEL_REQUIRED", to("NEEDS_HUMAN")],
 
   ["NEEDS_HUMAN", "HUMAN_APPROVED", to("APPROVED")],
-  ["NEEDS_HUMAN", "HUMAN_REQUEUE", to("READY")],
-  ["BLOCKED", "HUMAN_REQUEUE", to("READY")],
+  /* PRDR-112: a human stop the outage caused is not a human's to clear. */
+  ["NEEDS_HUMAN", "OUTAGE_REQUEUE", to("READY")],
+
+  /** PRDR-238: one row per state a human may restart the attempt from. */
+  ...REQUEUEABLE.map((state) => [state, "HUMAN_REQUEUE", to("READY")] as readonly [State, Event, Row]),
 ];
 
 function buildTable(): ReadonlyMap<string, Row> {

@@ -1,15 +1,30 @@
-import { existsSync, readFileSync } from "node:fs";
+import type { Ecosystem } from "../adapter/install.js";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { stateDir } from "../fs/layout.js";
-import { parseArtifact } from "../schemas/common.js";
+import { SCHEMA_VERSION, parseArtifact } from "../schemas/common.js";
 import { approvalSchema } from "../schemas/records.js";
 import type { Ticket } from "../schemas/ticket.js";
+import type { AmendmentRecord } from "../schemas/amendment.js";
+import type { AmendDecision } from "./amendment-decide.js";
 import type { PromptSet, SessionBackend } from "../sessions/backend.js";
+import { readBindings } from "../adapter/drift.js";
+import { gateLabel } from "../adapter/packages.js";
+import { acquireRunLock, lockPhaseSuffix, runLockRefusal } from "./run-lock.js";
+import { migrateState, migrationNote } from "./migrate.js";
+import { approvalState } from "../init/machine.js";
+import { MIXED_BUILDS_REFUSED, readPresentation, recordApproval, type ApprovalDecision } from "../init/present.js";
+import { isMixed } from "./build.js";
+import { recordPlanQuality } from "./plan-quality.js";
+import { NON_TICKET_FILES } from "./tickets/readers.js";
 import { ensureRunBranch, installTrailerHook } from "./git.js";
 import { RunJournal } from "./journal.js";
 import { Driver } from "./driver.js";
 import { RefereeCore, type PendingEntry } from "./referee.js";
 import { loadConfig, type LoadedConfig } from "./worstcase.js";
+import { routingAdvice } from "./routing-advice.js";
+import { ensureToolchains, type ToolchainOutcome } from "./run-toolchain.js";
+import { strandedByPremise } from "./referee-sweeps.js";
 
 /**
  * T-106 — the HEADLESS DRIVER (C-9, C-10, C-11, D-26/D-27).
@@ -37,11 +52,20 @@ export interface RunOptions {
   readonly backend: SessionBackend;
   readonly worker?: string;
   readonly maxTickets?: number;
+  /** V-1⁗ (PRDR-211): test seam for the ecosystems the referee installs for; production uses the table. */
+  readonly ecosystems?: readonly Ecosystem[];
   readonly runId?: string;
   /** B-2: per-ticket worktrees, merged `--no-ff` into the run branch on DONE. */
   readonly worktree?: boolean;
   /** Injectable wall clock (ms) for the X-1 `ticket_wall_clock_ms` fixtures. */
   readonly now?: () => number;
+  /**
+   * S-5⁶ (PRDR-319): the Claude Code the SDK bundles, which serves every
+   * session. The driver reads it, since ARCH-1 keeps the SDK's manifest out of
+   * the referee's reach; absent, no routed model is judged against a runtime,
+   * and the superseded defaults are still named.
+   */
+  readonly runtime?: string;
   /**
    * The vendored, hash-verified prompt set. Required, not defaulted: loading
    * lives in the sessions layer (`loadPromptSet`), and ARCH-1 forbids the
@@ -55,28 +79,66 @@ export interface RunOptions {
    * ticket stays pending and the run exits 10 with the JSON summary.
    */
   readonly escalate?: (input: EscalationInput) => Promise<EscalationAction>;
+  /**
+   * C-7 (PRDR-255): the SECOND exit. An approval deferred at `init` is offered
+   * here, on the same terms C-10 offers an escalation — the precondition lives
+   * in the driver so it is not one CLI verb's private behaviour, and only the
+   * transport of the human's answer is injected. Absent (every non-TTY
+   * invocation), the plan is presented and the run refuses; an absent human is
+   * never an approving one, so nothing is ever synthesized from the environment.
+   */
+  readonly approve?: (presentation: string) => Promise<ApprovalDecision>;
+  /** N-5″ (PRDR-297): put before `approve` where more than one build made the plan, as `init` puts it; absent, the answer is no. */
+  readonly acceptMixedBuilds?: (builds: readonly string[]) => Promise<boolean>;
   /** C-13: resume announcements and similar user-facing notices. */
   readonly announce?: (message: string) => void;
+  /**
+   * PRDR-190 (audit finding 2): what the run is doing, for whatever ends it.
+   *
+   * Declared here and supplied by `cli/run.ts`, because the recorder lives in
+   * `src/cli/**` and ARCH-1 forbids the kernel importing upward. Without it the
+   * phase marker existed on `init` alone: a signal during `detent run` recorded
+   * no phase and a lock left by a killed run named none — the same
+   * one-driver-only shape ARCH-2 exists to prevent, and which PRDR-140,
+   * PRDR-181 and PRDR-185 each found separately.
+   */
+  readonly phase?: (text: string) => void;
+  /** PRDR-112: injectable wait for the outage backoff; real time by default. */
+  readonly sleep?: (ms: number) => Promise<void>;
+  /**
+   * PRDR-276: the operator's answer to installing a missing toolchain, on the
+   * terms C-7 and C-10 are answered — a terminal's `[y/N]`, or
+   * `--install-toolchain` relayed. Absent, a missing toolchain refuses the run
+   * before it spends, naming the commands and the flag. PRDR-277: a yes also
+   * returns the tickets the message names — those a false premise stranded.
+   */
+  readonly approveToolchain?: (message: string) => Promise<boolean>;
+  /** PRDR-276: the probe and the installer, injectable like `sleep`; real ones by default. */
+  readonly toolchainProbe?: (exe: string) => boolean;
+  readonly toolchainInstall?: (exe: string, args: readonly string[]) => void;
 }
 
 export interface EscalationInput {
   readonly ticket: Ticket;
   readonly reason: string;
   readonly summary: string;
+  /** X-4⁸ (PRDR-286): the open amendment the ticket filed. Its escalation decides the amendment, and offers no ticket act. */
+  readonly amendment?: AmendmentRecord;
 }
 
 export type EscalationAction =
   | { readonly kind: "approve"; readonly by: string }
   | { readonly kind: "requeue"; readonly by: string; readonly guidance: string }
   | { readonly kind: "skip"; readonly by: string }
-  | { readonly kind: "quit" };
+  | { readonly kind: "quit" }
+  | { readonly kind: "amend"; readonly by: string; readonly decision: AmendDecision };
 
 
 export interface RunOutcome {
   readonly exitCode: 0 | 1 | 2 | 10;
   /** C-10's non-TTY machine-readable summary; schema-stable. */
   readonly summary: {
-    readonly schema_version: 1;
+    readonly schema_version: typeof SCHEMA_VERSION;
     readonly exit: number;
     readonly pending: readonly PendingEntry[];
     readonly reason?: string;
@@ -85,6 +147,14 @@ export interface RunOutcome {
 
 /** C-9/C-7: `run` executes only an approved plan; R-9: config loads or nothing runs. */
 export async function run(opts: RunOptions): Promise<RunOutcome> {
+  /**
+   * F-3″ (PRDR-300): an older state is carried to this build's version before
+   * the config is read, under the run lock, and a newer one is refused.
+   */
+  const migrated = migrateState(opts.root, { promptHashes: opts.prompts.hashes });
+  if (migrated.kind === "refused") return notReady(migrated.message);
+  const note = migrationNote(migrated);
+  if (note !== null) opts.announce?.(note);
   const configPath = path.join(stateDir(opts.root), "config.json");
   if (!existsSync(configPath)) {
     return notReady(`no config at ${configPath} — run \`detent init\` first`);
@@ -99,6 +169,20 @@ export async function run(opts: RunOptions): Promise<RunOutcome> {
 }
 
 /**
+ * The config file's text, for the line a routing note names (S-5⁶), or null:
+ * `runWithConfig` is also handed configs the load path would refuse, which no
+ * file on disk need hold.
+ */
+function configText(root: string): string | null {
+  try {
+    return readFileSync(path.join(stateDir(root), "config.json"), "utf8");
+  } catch {
+    /* no file: the note names the key without a line */
+    return null;
+  }
+}
+
+/**
  * Exposed separately for the X-1 backstop fixtures: the net-sessions ceiling
  * is unreachable under any config `loadConfig` accepts, so proving the
  * enforcement fires requires budgets the load path would refuse.
@@ -106,18 +190,145 @@ export async function run(opts: RunOptions): Promise<RunOutcome> {
 export async function runWithConfig(opts: RunOptions, loaded: LoadedConfig): Promise<RunOutcome> {
   const { root } = opts;
   const approval = readApproval(root);
-  if (approval !== "ok") return notReady(approval);
+  if (approval !== "ok") {
+    const decided = await offerDeferredApproval(opts, approval);
+    if (decided !== "ok") return decided;
+  }
+  /**
+   * C-9‴ (PRDR-139): the approval must be OF THIS PLAN. `run` parsed the file
+   * and never compared it, so tickets edited after approval executed
+   * unreviewed. Safe to check at run start only because `planHash` now covers
+   * the approved fields rather than whole ticket files — the whole-file hash
+   * changed on every transition and would have refused every resume.
+   *
+   * A DAMAGED plan is not a stale one, and conflating them misdiagnoses: an
+   * unreadable ticket changes the hash either way, so the check would report
+   * "the tickets have changed since you approved" for a file that is merely
+   * corrupt. `readTicket` refuses it by name a moment later, which is the error
+   * worth surfacing.
+   */
+  /**
+   * PRDR-153: an unreadable plan file REFUSES rather than disabling the check.
+   * `planFilesReadable` excluded only `approval.json` while `NON_TICKET_FILES`
+   * excludes `plan.json` too — so a conflicted `plan.json`, the most
+   * merge-prone file in a committed directory, turned the C-9 comparison off
+   * and nothing downstream noticed, because `allTickets` skips it by name. The
+   * "readTicket refuses it a moment later" argument held for ticket files and
+   * was false for this one.
+   */
+  if (!planArtifactReadable(root)) {
+    return notReady(
+      "`.detent/plan/plan.json` is not readable JSON, so the approval cannot be checked against the plan it names. " +
+        "Repair or restore it — a merge conflict there is the usual cause, and a run executes only what a human approved (C-9).",
+    );
+  }
+  /*
+   * A ticket that will not parse is DAMAGE, not an edit: `readTicket` refuses
+   * it by name a moment later, which is the precise error. Skipping the
+   * comparison here keeps that diagnosis rather than reporting "the tickets
+   * have changed since you approved".
+   */
+  const approved = ticketFilesReadable(root) ? approvalState(root) : { stale: false };
+  if (approved.stale) {
+    return notReady(
+      "the approval in .detent/plan/approval.json is for a different plan — the tickets have changed since it was " +
+        "given. Re-approve with `detent init` (C-9); a run executes only what a human approved.",
+    );
+  }
+  /**
+   * V-1″ (PRDR-135): a run with no bound test gate verifies nothing. Checked
+   * beside the config and approval preconditions, so it refuses before
+   * spending rather than at the first gate — where it used to mint a GREEN.
+   */
+  let bindings: readonly { readonly package: string; readonly slot: string; readonly resolved: string }[];
+  try {
+    bindings = readBindings(root).bindings;
+  } catch (err) {
+    /**
+     * PRDR-151: `readBindings` throws on an invalid or newer-schema file, and
+     * this sits outside the try below — so it REJECTED the promise instead of
+     * returning a `RunOutcome`, and the CLI printed a bare message with no
+     * machine-readable summary. Every sibling precondition returns `notReady`.
+     */
+    return notReady((err as Error).message);
+  }
+  if (!bindings.some((b) => b.slot === "test")) {
+    return notReady(
+      "no `test` gate is bound in .detent/bindings.json — a run would verify nothing. " +
+        "Run `detent init` to bind the project's verification commands (V-1).",
+    );
+  }
+
+
+  /**
+   * S-5 (PRDR-181): the pinned CLI version is CHECKED, on the path that runs.
+   *
+   * `SessionBackend.checkVersion` had one production caller — `doctor`, behind
+   * `--smoke` — so `detent run` never verified the pin, while `doctor` without
+   * `--smoke` reports the pin as "checked at run time". It was checked nowhere.
+   * A refusal belongs beside the other preconditions, before anything spends.
+   * The fixture backend answers trivially, so this costs a mock run nothing.
+   */
+  try {
+    await opts.backend.checkVersion(loaded.config.pinned.claude_code);
+  } catch (err) {
+    return notReady((err as Error).message);
+  }
+
+  /**
+   * PRDR-276: the toolchain behind every bound gate, checked where the need
+   * first arises and before anything spends. After S-5, so a run refused on
+   * its pin installs nothing; before the lock, so a refusal touches nothing.
+   * `init` does not check — an approved plan's `init` runs no phase (C-8), so a
+   * check there could never reach a project that has already planned.
+   *
+   * PRDR-277: the same question names the tickets a false premise stranded,
+   * and the same yes returns them — the pool's first draw requeues them below.
+   */
+  let toolchain: ToolchainOutcome;
+  try {
+    toolchain = await ensureToolchains(
+      /* V-5′ (PRDR-295): every package's gates, each named with its package. */
+      bindings.map((b) => ({ slot: gateLabel(b), resolved: b.resolved })),
+      {
+        ...(opts.approveToolchain === undefined ? {} : { approve: opts.approveToolchain }),
+        ...(opts.toolchainProbe === undefined ? {} : { probe: opts.toolchainProbe }),
+        ...(opts.toolchainInstall === undefined ? {} : { install: opts.toolchainInstall }),
+        ...(opts.announce === undefined ? {} : { announce: opts.announce }),
+      },
+      () => strandedByPremise(root),
+    );
+  } catch (err) {
+    /** An unreadable ticket, met while naming the stranded ones, is the kernel error the loop would have met (C-11). */
+    return { exitCode: EXIT_ERROR, summary: { schema_version: SCHEMA_VERSION, exit: EXIT_ERROR, pending: [], reason: (err as Error).message } };
+  }
+  if (!toolchain.ready) return notReady(toolchain.reason);
+
+  /**
+   * X-1⁷ (PRDR-147): one run per root. Taken before the journal, so a refused
+   * second run touches nothing; released on every exit path below.
+   */
+  const lock = acquireRunLock(root);
+  if (!lock.ok) return notReady(runLockRefusal(lock.heldBy));
+  if (lock.brokeStale !== null) {
+    opts.announce?.(`broke a stale run lock left by pid ${lock.brokeStale.pid} on this host${lockPhaseSuffix(lock.brokeStale)} (X-1⁷)`);
+  }
 
   let journal: RunJournal;
   try {
     journal = RunJournal.open(root);
   } catch (err) {
+    lock.release();
     return notReady((err as Error).message);
   }
 
   try {
     const runBranch = ensureRunBranch(root, opts.runId ?? `${process.pid}-${Date.now().toString(36)}`);
-    installTrailerHook(root);
+    const preservedHook = installTrailerHook(root);
+    if (preservedHook !== null) {
+      /* B-1′ (PRDR-146): a hook we did not write is kept, and the operator is told where. */
+      opts.announce?.(`your existing prepare-commit-msg hook was preserved at ${preservedHook} (B-1′)`);
+    }
     /**
      * PRDR-092: the run records the configuration it actually loaded. A
      * setting that stops applying between runs — the field report this ticket
@@ -129,11 +340,50 @@ export async function runWithConfig(opts: RunOptions, loaded: LoadedConfig): Pro
       event: "config",
       at: new Date().toISOString(),
       run_branch: runBranch.branch,
+      /**
+       * C-14″ (PRDR-129): which backend ran. `SessionBackend.name` existed with
+       * zero readers, so a journal could not answer "was this real?" even after
+       * the fact — a fixture run and a live run left identical records.
+       */
+      backend: opts.backend.name,
       budgets: loaded.config.budgets,
       model_routing: loaded.config.model_routing,
+      /**
+       * PRDR-235: beside the models, because this event's stated contract is
+       * "the run records the configuration it actually loaded" and effort was
+       * the one routed dimension it omitted — so a run at `max` and a run at
+       * the SDK default left identical records, and no experiment that raises
+       * effort could be told apart from one that did not.
+       */
+      effort_routing: loaded.config.effort_routing,
       protected: loaded.config.protected,
       risk: loaded.config.risk,
     });
+    /**
+     * S-5⁶ (PRDR-319): before the first session, as `init` says it and
+     * `doctor` reports it. Said, never refused: the routing is the config's
+     * own (S-5′), and a model the runtime cannot serve falls back per session
+     * (PRDR-114).
+     */
+    for (const line of routingAdvice(loaded.config.model_routing, opts.runtime ?? null, configText(opts.root))) {
+      opts.announce?.(line);
+    }
+    /**
+     * PRDR-276: an install Detent ran on the operator's machine leaves a record,
+     * on PRDR-211's precedent for an adapter-run command — here, beside the
+     * configuration this run loaded, because both describe what it ran under.
+     */
+    for (const a of toolchain.attempts) {
+      journal.appendTicketEvent("run", {
+        event: "toolchain_install",
+        at: new Date().toISOString(),
+        exe: a.exe,
+        command: a.command,
+        resolved: a.resolved,
+        detail: a.detail,
+      });
+    }
+
     const core = new RefereeCore(
       {
         root,
@@ -142,25 +392,120 @@ export async function runWithConfig(opts: RunOptions, loaded: LoadedConfig): Pro
         ...(opts.worker !== undefined ? { worker: opts.worker } : {}),
         ...(opts.now !== undefined ? { now: opts.now } : {}),
         ...(opts.worktree !== undefined ? { worktree: opts.worktree } : {}),
+        /** V-1⁗ (PRDR-211): the seam is forwarded, or the install table is the only reachable value. */
+        ...(opts.ecosystems !== undefined ? { ecosystems: opts.ecosystems } : {}),
+        /** PRDR-104: the headless loop has no model session to govern — no hook files. */
+        hookFiles: false,
+        /* X-1⁵ (audit finding 1): the advisory total speaks on BOTH drivers. */
+        ...(opts.announce === undefined ? {} : { announce: opts.announce }),
+        ...(toolchain.resume === null ? {} : { resumeOnInstall: toolchain.resume }),
       },
       loaded,
       journal,
       runBranch,
     );
     const driver = new Driver(opts, loaded, core);
-    return await driver.loop();
+    try {
+      return await driver.loop();
+    } finally {
+      /* N-5″ (PRDR-297): the run ends by recording the plan's figures; a record that cannot be made is said, and ends nothing. */
+      try {
+        recordPlanQuality(root, journal, new Date(opts.now?.() ?? Date.now()).toISOString());
+      } catch (err) {
+        opts.announce?.(`the plan's run-time outcomes were not recorded: ${(err as Error).message} (N-5″)`);
+      }
+    }
   } catch (err) {
     return {
       exitCode: EXIT_ERROR,
-      summary: { schema_version: 1, exit: EXIT_ERROR, pending: [], reason: (err as Error).message },
+      summary: { schema_version: SCHEMA_VERSION, exit: EXIT_ERROR, pending: [], reason: (err as Error).message },
     };
   } finally {
     journal.close();
+    /** X-1⁷: released on every exit path, including a throw. */
+    lock.release();
   }
 }
 
-function notReady(reason: string): RunOutcome {
-  return { exitCode: EXIT_NOT_READY, summary: { schema_version: 1, exit: EXIT_NOT_READY, pending: [], reason } };
+/** C-11's exit 2 with C-10's summary; `cli/run.ts` reports a refusal it meets before `run()` the same way (PRDR-300). */
+export function notReady(reason: string): RunOutcome {
+  return { exitCode: EXIT_NOT_READY, summary: { schema_version: SCHEMA_VERSION, exit: EXIT_NOT_READY, pending: [], reason } };
+}
+
+/**
+ * C-7 (PRDR-255): the SECOND exit — `run` presents a plan that was deferred.
+ *
+ * C-7 is dual-exit — "offered inline at the end of `init` (TTY), and, if
+ * deferred or non-TTY, presented by the first `detent run`" — with the AC
+ * "unapproved plan → `run` presents it before executing; declining leaves state
+ * READY-unapproved, exit 2". Only the init half was ever built: this function's
+ * caller refused with a string pointing the operator back at `init`, while
+ * `init` had already told them, in the present indicative and cited to C-7,
+ * that `run` would present the plan. Sixteen sites said so, two of them strings
+ * a human reads at the terminal.
+ *
+ * It sits at the very top of `runWithConfig`, before the lock, the journal and
+ * the branch, so a refusal here touches nothing — the placement PRDR-181 argued
+ * for the preconditions beside it.
+ *
+ * What it does NOT do is re-render. The text comes from the record `presentStage`
+ * persisted, so what `run` shows is what the human was shown, byte for byte.
+ * Rebuilding it from `state/` checkpoints would derive a fresh rendering from
+ * inputs F-4 may have invalidated, which is exactly how C-7′'s defect was
+ * produced (PRDR-087: forced re-execution re-ran ANALYZE and PLAN, and a
+ * DIFFERENT plan reached approval — eleven reviewed tickets, fourteen approved).
+ * No record means no presentation and no approval, not a substitute rendering.
+ *
+ * A STALE approval is deliberately not handled here. `readApproval` returns
+ * "ok" for one, and the C-9‴ comparison below refuses it by name; C-7′ made
+ * staleness an init-side PRESENT replay and PRDR-087 closed it there.
+ */
+async function offerDeferredApproval(opts: RunOptions, refusal: string): Promise<RunOutcome | "ok"> {
+  const shown = readPresentation(opts.root);
+  if (shown === null) {
+    return notReady(
+      `${refusal} There is no presentation on record for this plan, so there is nothing a human could be shown here — ` +
+        "re-run `detent init` to draft and present it (C-7).",
+    );
+  }
+  opts.announce?.(shown.presentation);
+  /**
+   * C-4⁵ (PRDR-292): `init` refuses to OFFER approval while a spec defect is
+   * open. The second exit must not become the way around the first one's
+   * gate, so it presents and stops rather than asking. A blocking question
+   * held it the same way until PRDR-296: no planning stage asks since C-3⁗.
+   */
+  if (shown.spec_defects > 0) {
+    return notReady(
+      `${String(shown.spec_defects)} spec defect(s) planning found in the pack hold approval of this plan — ` +
+        "amend the pack where each one quotes it and re-run `detent init` (C-4⁵).",
+    );
+  }
+  /* A-1⁷ (PRDR-293): and for a check that still fails, a path no gate can fail among them (V-5′). */
+  if (shown.check_failures > 0) {
+    return notReady(
+      `${String(shown.check_failures)} check(s) fail on the plan's tickets, and hold its approval — amend the pack where each ` +
+        "lies or edit the tickets, and re-run `detent init` (A-1⁷).",
+    );
+  }
+  /**
+   * C-5: no asker means no human — every non-TTY invocation lands here, and the
+   * plan has now been presented, which is the half of C-7 that is available
+   * without one. Nothing is synthesized from the environment.
+   */
+  if (opts.approve === undefined) return notReady(refusal);
+  /* N-5″ (PRDR-297): the presentation named the builds; a plan more than one made is offered only once that is accepted. */
+  if (isMixed(shown.builds) && !((await opts.acceptMixedBuilds?.(shown.builds)) ?? false)) return notReady(MIXED_BUILDS_REFUSED);
+  const decision = await opts.approve(shown.presentation);
+  if (decision.kind !== "approved") {
+    return notReady(
+      decision.kind === "declined"
+        ? "approval declined — the plan stays READY-unapproved (C-7); edit it with `detent init` or approve it on the next run"
+        : "approval deferred — the plan stays READY-unapproved (C-7) and the next `detent run` presents it again",
+    );
+  }
+  recordApproval(opts.root, decision.by, opts.now?.() ?? Date.now(), { builds: shown.builds, pack_hash: shown.pack_hash });
+  return "ok";
 }
 
 function readApproval(root: string): string {
@@ -171,4 +516,36 @@ function readApproval(root: string): string {
   const parsed = parseArtifact(approvalSchema, JSON.parse(readFileSync(file, "utf8")));
   if (!parsed.ok) return `plan approval is invalid — re-approve (C-7)`;
   return "ok";
+}
+
+/**
+ * C-9‴ (PRDR-153): `plan.json` is what NAMES the approved set, so an unreadable
+ * one is a refusal in its own right. It used to fall into the same bucket as a
+ * corrupt ticket and silently disable the whole comparison — and nothing
+ * downstream noticed, because `allTickets` skips it by name.
+ */
+function planArtifactReadable(root: string): boolean {
+  const file = path.join(stateDir(root), "plan", "plan.json");
+  if (!existsSync(file)) return true;
+  try {
+    JSON.parse(readFileSync(file, "utf8"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Every TICKET parses, so a hash comparison means what it says. */
+function ticketFilesReadable(root: string): boolean {
+  const dir = path.join(stateDir(root), "plan");
+  if (!existsSync(dir)) return true;
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(".json") || NON_TICKET_FILES.has(name)) continue;
+    try {
+      JSON.parse(readFileSync(path.join(dir, name), "utf8"));
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }

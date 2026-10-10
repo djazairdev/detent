@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { EFFORT_LEVELS, ROLE_IDS, TASK_KEYS } from "../schemas/roles.js";
 import { budgetsSchema, type Budgets } from "../schemas/budgets.js";
 import { SCHEMA_VERSION, glob, nonEmptyString } from "../schemas/common.js";
 import type { State } from "../schemas/states.js";
@@ -115,6 +116,8 @@ export function maxPossibleSessions(
       if (event === "HUMAN_REQUEUE" || event === "HUMAN_APPROVED") continue;
       /** X-4′: a discovered dependency re-queues into a new generation the same way. */
       if (event === "DEPENDENCY_DISCOVERED") continue;
+      /** PRDR-112: so does an outage re-queue. */
+      if (event === "OUTAGE_REQUEUE") continue;
       /** BUDGET_BREACH and GATE_DRIFT are halts, never the worst path. */
       if (event === "BUDGET_BREACH" || event === "GATE_DRIFT") continue;
       let result;
@@ -147,12 +150,135 @@ const configSchema = z.strictObject({
    * rediscovers everything and re-plans the entire thing.
    */
   plan_docs: z.array(glob).default([]),
+  /** C-2‴ (PRDR-117): the production baseline SLICE plans against; "none" opts out, in writing. */
+  plan_baseline: z.enum(["production", "none"]).default("production"),
+  /**
+   * C-2⁵′ (PRDR-125): how many tickets one slice should hold.
+   *
+   * A slice is drafted by ONE session into ONE artifact, so its size is the
+   * size of the largest thing this pipeline ever has to produce without
+   * failing. Measured on the first self-build gate: a 36-ticket slice emitted
+   * 176,391 output tokens — about 4,900 per ticket, because a ticket now
+   * carries its contracts and their notes — and that draft is where a session
+   * limit killed the run. The old band's top was set before contracts existed.
+   *
+   * Smaller slices do not save money: the drafting is the same work, and the
+   * review, revision and re-review around each slice are paid per slice. They
+   * buy a failure you can afford — half the tokens, half the loss when a
+   * session dies, which on a run that has died four times is worth more than
+   * the overhead costs.
+   */
+  slice_size: z
+    .strictObject({ min: z.number().int().positive(), max: z.number().int().positive() })
+    .refine((v) => v.max >= v.min, "slice_size.max must be at least slice_size.min")
+    .default({ min: 12, max: 18 }),
+  /**
+   * S-6‴: how a VALIDATE reviewer gets the pack's foundations. `read`, the
+   * default, has each reviewer read them itself. `given` hands every reviewer
+   * of a round their text as its system prompt, byte for byte the same, which
+   * the prompt cache then serves to all but the round's first reviewers. It
+   * changes what a reviewer is handed, so it is the default only once N-8's
+   * review set passes with it. On 2026-10-03, at `high`, PRDR-322's run found
+   * all 18 blockers, and PRDR-334 scored it against the majors too: 113 of the
+   * 132, where reviewers reading them at `high` reported 124, under N-8′'s 119.
+   */
+  review_foundations: z.enum(["read", "given"]).default("read"),
   risk: z.array(glob).default([]),
-  model_routing: z.record(z.string(), nonEmptyString).default({}),
+  /**
+   * PRDR-142: the KEYS are roles. This accepted any string, and `roles.ts`
+   * claims the typing makes a bad role "a compile error here, not a silent
+   * runtime default" — true of `DEFAULT_MODEL_ROUTING`, false of the config a
+   * human edits, which `cli/init.ts` explicitly invites them to edit. A typo
+   * routed that role to the runtime default forever, at whatever the runtime
+   * charges, with nothing printed and no `doctor` check.
+   */
+  model_routing: z
+    .record(z.string(), nonEmptyString)
+    .default({})
+    .superRefine((routing, ctx) => {
+      for (const key of Object.keys(routing)) {
+        if (ROLE_IDS.includes(key as (typeof ROLE_IDS)[number])) continue;
+        ctx.addIssue({
+          code: "custom",
+          message: `model_routing has no role \`${key}\` — expected one of ${ROLE_IDS.join(", ")}`,
+        });
+      }
+    }),
+  /**
+   * PRDR-197: effort per role, beside `model_routing`.
+   *
+   * Validated on BOTH axes because PRDR-142 was the lesson: `model_routing`
+   * accepted any key, so a typo routed that role to the runtime default forever
+   * with nothing printed. An unknown role and an unknown level are each refused
+   * by name. Empty by default, so a config that says nothing gets exactly the
+   * sessions it got before.
+   *
+   * S-5⁷: a key may also name a role's task, `audit/verify_claims`,
+   * which routes that task apart from its role. A task the role does not run
+   * is refused like an unknown role, since a misspelt task would leave its
+   * sessions at the role's level with nothing said.
+   */
+  effort_routing: z
+    .record(z.string(), z.string())
+    .default({})
+    .superRefine((routing, ctx) => {
+      for (const [key, value] of Object.entries(routing)) {
+        if (!ROLE_IDS.includes(key as (typeof ROLE_IDS)[number]) && !TASK_KEYS.includes(key)) {
+          ctx.addIssue({
+            code: "custom",
+            message: `effort_routing has no role or task \`${key}\` — expected one of ${[...ROLE_IDS, ...TASK_KEYS].join(", ")}`,
+          });
+        }
+        if (!EFFORT_LEVELS.includes(value as (typeof EFFORT_LEVELS)[number])) {
+          ctx.addIssue({
+            code: "custom",
+            message: `effort_routing.${key} is \`${value}\` — expected one of ${EFFORT_LEVELS.join(", ")}`,
+          });
+        }
+      }
+    }),
   pinned: z.strictObject({
     agent_sdk: nonEmptyString,
     claude_code: nonEmptyString,
   }),
+  /**
+   * S-3⁸ (PRDR-121): optional symbol intelligence. Absent or disabled, every
+   * stage runs unchanged. Detent never installs it — `enabled` with a command
+   * it cannot run is a setup message, not an install (D-4/F-2).
+   */
+  symbols: z
+    .strictObject({
+      /**
+       * S-3″ (PRDR-121): TRI-STATE on purpose — absent is NOT `false`.
+       *
+       * This defaulted to `false`, and the default made the reminder dead code
+       * in every real project. `init` writes a config before it reads one, so
+       * `symbols` always parsed to the default object, and the reminder — whose
+       * whole contract is "a user who declined once is never asked again" —
+       * read that default as an explicit decline. It could only ever fire when
+       * the config was `undefined`, which the production path never produces,
+       * and its test passed because that is the only case the test passed in.
+       *
+       * Undefined means nobody has said anything yet; `false` means a person
+       * said no. Only the second one silences.
+       */
+      enabled: z.boolean().optional(),
+      /**
+       * S-3‴ (PRDR-123): a bare executable NAME, resolved on PATH — never a
+       * path. `.detent/config.json` is repository content, and an unrestricted
+       * string let a repo point the orchestrator at an executable it shipped
+       * and have it run at the operator's privilege, before anything was
+       * presented or approved. Constrained here, at load, rather than at the
+       * call site, so no execution path can be reached with a value that never
+       * should have parsed.
+       */
+      command: z
+        .string()
+        .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, "symbols.command is an executable name resolved on PATH, not a path — no `/`, `\\` or `..`")
+        .default("serena"),
+      pinned: nonEmptyString.default("0.1.4"),
+    })
+    .default({ command: "serena", pinned: "0.1.4" }),
   /**
    * S-1: sessions are constructed with no external setting sources. Recorded in
    * config so `doctor` can report it and a backend upgrade cannot silently
@@ -162,33 +288,25 @@ const configSchema = z.strictObject({
 });
 type Config = z.infer<typeof configSchema>;
 
-export class ConfigRejectedError extends Error {
-  constructor(
-    readonly net: number,
-    readonly computed: number,
-  ) {
-    super(
-      `config rejected: budgets.sessions is ${net}, but the worst path through the transition table needs ${computed}. ` +
-        `The net session budget must exceed the computed worst case (X-1); raise sessions above ${computed}.`,
-    );
-    this.name = "ConfigRejectedError";
-  }
-}
-
 export interface LoadedConfig {
   readonly config: Config;
   readonly computedWorstCase: number;
 }
 
 /**
- * R-9: parse, compute, assert, return. The CLI never sees an invalid config
- * object, so no caller can start a run against budgets that cannot complete.
+ * R-9: parse, compute, return. The CLI never sees a config whose transition
+ * table cannot terminate, because `maxPossibleSessions` still throws
+ * `UnboundedWorstCaseError` on a cycle — that walk IS the termination proof and
+ * PRDR-265 keeps it precisely because the ladder guards it depends on were
+ * carved out of the counting conversion.
+ *
+ * What PRDR-265 removes is the comparison against `budgets.sessions`. That
+ * ceiling counts now, so a config setting it below the computed figure is no
+ * longer wrong — it cannot refuse anything, and refusing to LOAD over it was
+ * enforcing a budget at the one moment nothing had been spent.
  */
 export function loadConfig(raw: unknown): LoadedConfig {
   const config = configSchema.parse(raw);
   const computed = maxPossibleSessions(config.budgets);
-  if (config.budgets.sessions <= computed) {
-    throw new ConfigRejectedError(config.budgets.sessions, computed);
-  }
   return { config, computedWorstCase: computed };
 }

@@ -1,6 +1,8 @@
 import { rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { SPAWN_TOOLS, type StageDriver } from "../fs/hook-files.js";
 import { HOOK_STAGE_FILE, HOOK_SURFACE_FILE, stateDir } from "../fs/layout.js";
+import { SCHEMA_VERSION } from "../schemas/common.js";
 
 /**
  * T-120/T-121 — the referee's half of the plugin containment hook (D-21,
@@ -27,15 +29,9 @@ export interface ClaimPolicyInput {
   readonly expiresAtMs: number;
 }
 
-/**
- * D-28's ambient billable spawn tools, by every name the platform has shipped
- * them under: `Task` (classic subagent launcher), `Agent` (its successor),
- * `TaskCreate` (background-task spawn). T-124's live leg found a build whose
- * print-mode sessions expose only the newer names — an exact-match list
- * pinned to "Task" alone guarded yesterday's platform. Reads/controls
- * (TaskGet/TaskOutput/TaskStop) spawn nothing and stay allowed.
- */
-const BILLABLE_SPAWN_TOOLS = ["Task", "Agent", "TaskCreate"] as const;
+/** D-28's spawn tools: the guard's own list (D-28″, PRDR-215) — published here for the plugin driver's session file. */
+const BILLABLE_SPAWN_TOOLS = SPAWN_TOOLS;
+
 
 /** The one-shot Stop nudge (T-120's re-feed; official precedent: ralph-wiggum). */
 export const RUN_REFEED_TEXT =
@@ -46,7 +42,7 @@ export const RUN_REFEED_TEXT =
 
 export function publishClaimPolicy(root: string, input: ClaimPolicyInput): void {
   writeJson(path.join(stateDir(root), HOOK_SURFACE_FILE), {
-    schema_version: 1,
+    schema_version: SCHEMA_VERSION,
     ticket_id: input.ticketId,
     driver: true,
     surface: [],
@@ -67,19 +63,24 @@ export function clearClaimPolicy(root: string): void {
  * human-gated run stops cleanly, and a mid-run stop gets one deterministic
  * nudge. `gate_cmd` stays null on the driver path; the worker-style red/green
  * stop gate is a different producer of the same file shape.
+ *
+ * D-27‴ (PRDR-099): the file names the referee that drives the run, so the
+ * Stop hook nudges the session that referee serves, and not another session
+ * opened in the same root while it lives.
  */
-export function refreshRunRefeed(root: string, active: boolean, expiresAtMs: number): void {
+export function refreshRunRefeed(root: string, active: boolean, expiresAtMs: number, driver?: StageDriver): void {
   const file = path.join(stateDir(root), HOOK_STAGE_FILE);
   if (!active) {
     rmSync(file, { force: true });
     return;
   }
   writeJson(file, {
-    schema_version: 1,
+    schema_version: SCHEMA_VERSION,
     stage: "driver",
     gate_cmd: null,
     run_refeed: RUN_REFEED_TEXT,
     expires_at_ms: expiresAtMs,
+    ...(driver === undefined ? {} : { driver }),
   });
 }
 

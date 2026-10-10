@@ -1,15 +1,15 @@
-import { readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { RunJournal } from "../../src/kernel/journal.js";
-import { SpendExhaustedError, SpendLedger, readRecordedSpend } from "../../src/kernel/ledger.js";
-import { EXIT_HUMAN_GATED, run } from "../../src/kernel/run.js";
+import { SpendLedger, noteUnitComplete, readRecordedSpend } from "../../src/kernel/ledger.js";
+import { EXIT_HUMAN_GATED, EXIT_OK, run } from "../../src/kernel/run.js";
 import { readTicket } from "../../src/kernel/tickets/readers.js";
 import { ledgerRowSchema } from "../../src/schemas/records.js";
-import { MockBackend, okResult } from "../../src/sessions/mock.js";
+import { MockBackend, okResult, type StageFn } from "../../src/sessions/mock.js";
 import { loadPromptSet } from "../../src/sessions/prompts.js";
-import { removeTree, writeTree } from "../helpers.js";
-import { addTicket, implementRed, makeRunRepo } from "./run-fixture.js";
+import { removeTree, tmpTree, writeTree } from "../helpers.js";
+import { addTicket, implementGreen, implementRed, makeRunRepo, reviewApprove } from "./run-fixture.js";
 
 /** T-048 — the ledger and the cross-generation spend backstop (S-4, X-8, D-25). */
 
@@ -38,29 +38,33 @@ const rows = (root: string) =>
     .map((line) => ledgerRowSchema.parse(JSON.parse(line)));
 
 describe("T-048 D-25: the spend ceiling is a launch gate", () => {
-  it("overshoot is bounded by ONE in-flight session; the next launch is refused → NEEDS_HUMAN, exit 10", async () => {
-    /**
-     * Ceiling below one session's cost: the first launch is allowed (spend 0),
-     * its 0.001 crosses the ceiling, and the second launch is refused.
-     */
+  /**
+   * X-1⁵ (PRDR-191) replaces what this case used to assert. It drove a run at a
+   * ceiling below one session's cost and required the SECOND launch to be
+   * refused → NEEDS_HUMAN. That behaviour is deleted: a total fired on success,
+   * and the run above was a working run stopped by arithmetic. Asserted through
+   * `run` rather than the ledger class, because the production path is where
+   * the old refusal lived and where its absence has to be observable.
+   */
+  it("a total below one session's cost no longer stops a working run (X-1⁵)", async () => {
     const root = await fixture(0.0005);
     addTicket(root, { id: "t1" });
 
     const backend = new MockBackend({ implement: implementRed });
     const outcome = await run({ root, backend, prompts: PROMPTS, runId: "spend" });
 
-    expect(outcome.exitCode).toBe(EXIT_HUMAN_GATED);
-    /** exactly one launch */
-    expect(backend.calls.map((c) => c.role)).toEqual(["implement"]);
+    /** The ladder runs its course; nothing was refused for reaching a total. */
+    expect(backend.calls.length).toBeGreaterThan(1);
+    expect(readRecordedSpend(root)).toBeGreaterThan(0.0005);
     const t1 = readTicket(root, "t1");
-    expect(t1.state).toBe("NEEDS_HUMAN");
-    expect(t1.notes.map((n) => n.text).join(" ")).toContain("run-spend exhaustion");
     /**
-     * The overshoot is recorded honestly: ledger total exceeds the ceiling by
-     * at most the one session that was in flight.
+     * It still ends human-gated — but for the LADDER exhausting on a red gate,
+     * which is the honest outcome for `implementRed`. What must not appear is a
+     * refusal for reaching a total, and that is what the note asserts.
      */
-    expect(rows(root)).toHaveLength(1);
-    expect(readRecordedSpend(root)).toBeCloseTo(0.001, 6);
+    expect(outcome.exitCode).toBe(EXIT_HUMAN_GATED);
+    expect(t1.notes.map((n) => n.text).join(" ")).not.toContain("run-spend exhaustion");
+    expect(rows(root).length).toBeGreaterThan(1);
   });
 
   it("spend accumulates across resumed invocations — a requeue never resets the money (X-8)", async () => {
@@ -78,9 +82,149 @@ describe("T-048 D-25: the spend ceiling is a launch gate", () => {
     try {
       const ledger2 = new SpendLedger(root, journal2, 0.2);
       expect(ledger2.spent()).toBeCloseTo(0.25, 6);
-      expect(() => ledger2.assertLaunchAllowed()).toThrow(SpendExhaustedError);
     } finally {
       journal2.close();
+    }
+  });
+});
+
+/**
+ * X-1⁵ (PRDR-191) — the ceiling counts; what halts is spend WITHOUT PROGRESS.
+ *
+ * A total fires on success and fires late on failure. Legitimate work completes
+ * things — a slice, a ticket reaching DONE — and a runaway does not, so the
+ * quantity worth bounding is dollars since the last completed unit.
+ */
+describe("X-1⁵ the run ceiling counts and does not block", () => {
+  it("does not halt a run that has passed its advisory total, and says so once", async () => {
+    const root = await fixture();
+    const journal = RunJournal.open(root);
+    const said: string[] = [];
+    try {
+      const ledger = new SpendLedger(
+        root,
+        journal,
+        0.01,
+        { spend_without_progress_floor_usd: 100, spend_without_progress_multiple: 3, spend_without_progress_sessions: 1 },
+        (t) => said.push(t),
+      );
+      ledger.record("t1", 0, "implement", okResult({ costEstimateUsd: 5 }), "2026-08-18T10:00:00.000Z");
+      expect(ledger.spent()).toBeGreaterThan(0.01);
+      expect(() => ledger.recordLaunch()).not.toThrow();
+      expect(ledger.overAdvisoryTotal()).toBe(true);
+      /* Counting without reporting is not counting — but a warning on every launch is noise. */
+      expect(said).toHaveLength(1);
+      expect(said[0]).toContain("advisory");
+      ledger.recordLaunch();
+      ledger.recordLaunch();
+      expect(said).toHaveLength(1);
+
+      /**
+       * PRDR-195: and once for the RUN, not once per session.
+       *
+       * `init` builds a fresh `SpendLedger` for every session launch, so a flag
+       * held in the instance resets each time — the live log fired three times
+       * in thirteen minutes. Asserting against one instance was the wrong scope
+       * and is why the original case passed; production never has one.
+       */
+      const second = new SpendLedger(
+        root,
+        journal,
+        0.01,
+        { spend_without_progress_floor_usd: 100, spend_without_progress_multiple: 3, spend_without_progress_sessions: 1 },
+        (t) => said.push(t),
+      );
+      second.recordLaunch();
+      expect(said).toHaveLength(1);
+    } finally {
+      journal.close();
+    }
+  });
+
+  /**
+   * PRDR-265 inverted this test's verb. It asserted `toThrow(NoProgressError)`
+   * — the breaker HALTED the run — and what it measures is unchanged: money
+   * leaving with nothing finishing. The number is now announced to the operator
+   * instead of enforced against them, so the assertion moves from the exception
+   * to the sentence, which is the only place the figure was ever useful.
+   */
+  it("announces when money goes out and nothing completes", async () => {
+    const root = await fixture();
+    const journal = RunJournal.open(root);
+    const said: string[] = [];
+    try {
+      const ledger = new SpendLedger(
+        root,
+        journal,
+        0,
+        { spend_without_progress_floor_usd: 10, spend_without_progress_multiple: 3, spend_without_progress_sessions: 1 },
+        (t) => said.push(t),
+      );
+      for (let i = 0; i < 3; i += 1) {
+        ledger.record(`t${String(i)}`, 0, "implement", okResult({ costEstimateUsd: 4 }), "2026-08-18T10:00:00.000Z");
+      }
+      expect(() => ledger.recordLaunch(), "the launch proceeds — a budget does not decide this").not.toThrow();
+      expect(said.join(" "), "and the operator is told the figure").toContain("no-progress breaker");
+      expect(said.join(" "), "with the spend that produced it").toContain("12.0000");
+    } finally {
+      journal.close();
+    }
+  });
+
+  it("never halts a run that keeps completing units, however expensive", async () => {
+    const root = await fixture();
+    const journal = RunJournal.open(root);
+    try {
+      const ledger = new SpendLedger(root, journal, 0, { spend_without_progress_floor_usd: 10, spend_without_progress_multiple: 3, spend_without_progress_sessions: 1 });
+      for (let i = 0; i < 20; i += 1) {
+        ledger.record(`t${String(i)}`, 0, "implement", okResult({ costEstimateUsd: 8 }), "2026-08-18T10:00:00.000Z");
+        ledger.noteProgress();
+        expect(() => ledger.recordLaunch()).not.toThrow();
+      }
+      expect(ledger.spent()).toBeCloseTo(160, 6);
+    } finally {
+      journal.close();
+    }
+  });
+
+  /**
+   * The trap this design walks into if the threshold is a mean alone. A resumed
+   * run reuses finished slices for $0, so the observed cost per unit collapses
+   * to zero and a purely derived threshold would halt on the first dollar
+   * spent — punishing exactly the checkpoint reuse C-8 exists to provide.
+   */
+  it("does not collapse to zero when completed units cost nothing (C-8 reuse)", async () => {
+    const root = await fixture();
+    const journal = RunJournal.open(root);
+    try {
+      const ledger = new SpendLedger(root, journal, 0, { spend_without_progress_floor_usd: 10, spend_without_progress_multiple: 3, spend_without_progress_sessions: 1 });
+      for (let i = 0; i < 8; i += 1) ledger.noteProgress();
+      ledger.record("t1", 0, "planner", okResult({ costEstimateUsd: 5 }), "2026-08-18T10:00:00.000Z");
+      expect(() => ledger.recordLaunch()).not.toThrow();
+    } finally {
+      journal.close();
+    }
+  });
+
+  /** PRDR-265: the evidence is the point, and it survives the exception it used to travel in. */
+  it("carries the spend since the last unit in what it says", async () => {
+    const root = await fixture();
+    const journal = RunJournal.open(root);
+    const said: string[] = [];
+    try {
+      const ledger = new SpendLedger(
+        root,
+        journal,
+        0,
+        { spend_without_progress_floor_usd: 1, spend_without_progress_multiple: 3, spend_without_progress_sessions: 1 },
+        (t) => said.push(t),
+      );
+      ledger.record("t1", 0, "planner", okResult({ costEstimateUsd: 9 }), "2026-08-18T10:00:00.000Z");
+      ledger.record("t2", 0, "planner", okResult({ costEstimateUsd: 9 }), "2026-08-18T10:00:00.000Z");
+      ledger.recordLaunch();
+      expect(said.join(" ")).toMatch(/18\.00.*without completing/s);
+    } finally {
+      journal.close();
     }
   });
 });
@@ -128,17 +272,29 @@ describe("T-048 field discipline (S-4, PRDR-052/053)", () => {
       implement: () =>
         okResult({ ok: false, crashed: true, costEstimateUsd: 0, inputTokens: 0, outputTokens: 0, turns: 0 }),
     });
-    const outcome = await run({ root, backend, prompts: PROMPTS, runId: "crash" });
+    /** PRDR-112: a refusal is backed off and retried before the run gives up; the wait is injected here. */
+    const sleeps: number[] = [];
+    const outcome = await run({
+      root,
+      backend,
+      prompts: PROMPTS,
+      runId: "crash",
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
 
     /**
      * The LEDGER ROW comes first and survives the halt: a flagged $0 lower
      * bound, never free work and never the S-4 telemetry breaker. Zero turns
      * means the session never started, so the run then stops as a
-     * SessionRefusal (PRDR-072) — the reason names the refusal, not S-4.
+     * SessionRefusal (PRDR-072) — the reason names the refusal, not S-4 —
+     * after PRDR-112's backoff ladder has been walked in full.
      */
     const crashRow = rows(root).find((r) => r.partial === "crash");
     expect(crashRow).toBeDefined();
     expect(crashRow!.cost_estimate_usd).toBe(0);
+    expect(sleeps).toHaveLength(3);
     expect((outcome.summary as { reason?: string }).reason).toMatch(/refused implement session for t1/);
   });
 
@@ -150,6 +306,200 @@ describe("T-048 field discipline (S-4, PRDR-052/053)", () => {
       expect(() =>
         ledger.record("t1", 0, "implement", okResult({ costEstimateUsd: -1 }), "2026-08-18T10:00:00.000Z"),
       ).toThrow();
+    } finally {
+      journal.close();
+    }
+  });
+});
+
+/**
+ * X-1⁷ (PRDR-136) — the READ path is as strict as the write.
+ *
+ * `readRecordedSpend` was `JSON.parse(line) as { cost_estimate_usd?: number }`
+ * followed by `?? 0`, and it is the cross-generation financial backstop the
+ * D-25 launch gate compares against. The existing test above covers `record`,
+ * the write side, on files the code itself wrote.
+ */
+describe("X-1⁷ a spend total is only as trustworthy as the rows it sums", () => {
+  const row = (over: Record<string, unknown>): string =>
+    JSON.stringify({
+      at: "2026-09-01T00:00:00.000Z",
+      ticket: "t-1",
+      generation: 0,
+      role: "implement",
+      cost_estimate_usd: 1,
+      input_tokens: 1,
+      output_tokens: 1,
+      turns: 1,
+      ...over,
+    });
+
+  function rootWith(lines: string[]): string {
+    const root = tmpTree({});
+    roots.push(root);
+    mkdirSync(path.join(root, ".detent"), { recursive: true });
+    writeFileSync(path.join(root, ".detent", "ledger.jsonl"), `${lines.join("\n")}\n`);
+    return root;
+  }
+
+  it("sums valid rows", () => {
+    expect(readRecordedSpend(rootWith([row({ cost_estimate_usd: 5 }), row({ cost_estimate_usd: 3 })]))).toBe(8);
+  });
+
+  it("refuses a string cost rather than concatenating it", () => {
+    /* `5 + "5" + 3` produced the string "553", which then compared against the ceiling. */
+    expect(() => readRecordedSpend(rootWith([row({ cost_estimate_usd: 5 }), row({ cost_estimate_usd: "5" })]))).toThrow(/not a ledger row/);
+  });
+
+  it("refuses a negative cost rather than subtracting it", () => {
+    expect(() => readRecordedSpend(rootWith([row({ cost_estimate_usd: -1000 })]))).toThrow(/not a ledger row/);
+  });
+
+  it("still tolerates a torn LAST line — the one shape a crash produces", () => {
+    const root = rootWith([row({ cost_estimate_usd: 4 })]);
+    appendFileSync(path.join(root, ".detent", "ledger.jsonl"), '{"at":"2026-09-01T00:00:0');
+    expect(readRecordedSpend(root)).toBe(4);
+  });
+
+  /**
+   * PRDR-151: this used to assert that a torn line anywhere but the end was
+   * FATAL, which sounds right and bricked a root. `appendLedger` writes
+   * `JSON.stringify(row) + "\n"`, so a line torn mid-append has no trailing
+   * newline and the NEXT append concatenates onto it — one `kill -9` then made
+   * every later run refuse at startup, forever, with no repair instruction.
+   *
+   * Unparseable TEXT is a crash artifact at any position and is skipped, which
+   * still holds. PRDR-249 narrowed the LOSS: the complete rows glued onto the
+   * fragment are recovered, and only the fragment — whose bytes stopped
+   * mid-flight and whose cost is genuinely unknown — is dropped.
+   */
+  it("recovers the real rows a later append glued onto a torn line", () => {
+    const root = tmpTree({});
+    roots.push(root);
+    mkdirSync(path.join(root, ".detent"), { recursive: true });
+    const f = path.join(root, ".detent", "ledger.jsonl");
+    /* The crash shape: a torn last line with no newline. */
+    writeFileSync(f, `${row({ cost_estimate_usd: 10 })}\n{"at":"2026`);
+    appendFileSync(f, `${row({ cost_estimate_usd: 7 })}\n`);
+    appendFileSync(f, `${row({ cost_estimate_usd: 3 })}\n`);
+    /* 10 + 7 + 3: the 7 rode the torn line and is complete, so it counts. */
+    expect(readRecordedSpend(root)).toBe(20);
+  });
+
+  /**
+   * PRDR-249: the worse shape, and the one PRDR-151's "at most the row glued to
+   * the torn one" did not cover. A tear landing exactly at the record separator
+   * — the row fully written, its newline not — leaves TWO complete rows on one
+   * line, and `JSON.parse` rejects the pair for trailing content, so both were
+   * lost. One crash dropped $110 of $111.
+   */
+  it("recovers both rows when the tear landed exactly at the record separator", () => {
+    const root = tmpTree({});
+    roots.push(root);
+    mkdirSync(path.join(root, ".detent"), { recursive: true });
+    const f = path.join(root, ".detent", "ledger.jsonl");
+    writeFileSync(f, `${row({ cost_estimate_usd: 10 })}`);
+    appendFileSync(f, `${row({ cost_estimate_usd: 100 })}\n`);
+    appendFileSync(f, `${row({ cost_estimate_usd: 1 })}\n`);
+    expect(readRecordedSpend(root)).toBe(111);
+  });
+
+  /**
+   * PRDR-249: a recovered object that is not a ledger row is SKIPPED, not fatal.
+   * On an intact line a non-row still throws — that is X-1⁷, the ceiling cannot
+   * trust a shape its writer could not produce — but an object dug out of a
+   * damaged line is itself a crash artifact, and PRDR-151's lesson is that a
+   * crash artifact must never brick a root.
+   */
+  it("skips a recovered object that is not a ledger row rather than refusing the file", () => {
+    const root = tmpTree({});
+    roots.push(root);
+    mkdirSync(path.join(root, ".detent"), { recursive: true });
+    const f = path.join(root, ".detent", "ledger.jsonl");
+    writeFileSync(f, `${row({ cost_estimate_usd: 4 })}\n{"at":"2026`);
+    appendFileSync(f, `${JSON.stringify({ not: "a ledger row" })}\n`);
+    expect(readRecordedSpend(root)).toBe(4);
+  });
+});
+
+/**
+ * PRDR-219 — a breaker that stopped listening.
+ *
+ * The mark lives in `progress.json`, written by `noteUnitComplete(root)` from
+ * wherever work completes. `SpendLedger` read it once, in its constructor.
+ * `init` builds a ledger per launch and never noticed; the run builds ONE, so
+ * every DONE after 08:04:32 on gate-313 moved a file the instance never read
+ * again, and at 08:26:33 it measured $52.76 "without completing a unit"
+ * fourteen minutes after a ticket had.
+ */
+describe("PRDR-219 the breaker measures from the mark on disk, not the one it was born with", () => {
+  const BREAKER = { spend_without_progress_floor_usd: 10, spend_without_progress_multiple: 3, spend_without_progress_sessions: 1 };
+
+  it("a unit noted through the file resets a ledger constructed before it", async () => {
+    const root = await fixture();
+    const journal = RunJournal.open(root);
+    try {
+      const said: string[] = [];
+      const ledger = new SpendLedger(root, journal, 0, BREAKER, (t) => said.push(t));
+      for (let i = 0; i < 3; i += 1) {
+        ledger.record(`t${String(i)}`, 0, "implement", okResult({ costEstimateUsd: 4 }), "2026-08-18T10:00:00.000Z");
+      }
+      /* The run's DONE path: the file moves; the instance was never told. */
+      noteUnitComplete(root);
+      ledger.recordLaunch();
+      /* And the unit's cost on disk is what the threshold derives from now. */
+      ledger.record("t3", 0, "implement", okResult({ costEstimateUsd: 30 }), "2026-08-18T10:00:00.000Z");
+      ledger.recordLaunch();
+      const breakerSaid = (): string[] => said.filter((t) => t.includes("no-progress breaker"));
+      expect(breakerSaid(), "12 × 3 = 36 allowed since the unit — nothing to say yet").toEqual([]);
+      ledger.record("t4", 0, "implement", okResult({ costEstimateUsd: 10 }), "2026-08-18T10:00:00.000Z");
+      ledger.recordLaunch();
+      expect(breakerSaid(), "past the threshold derived from the unit's own cost").toHaveLength(1);
+    } finally {
+      journal.close();
+    }
+  });
+
+  it("end to end: one ledger for the run, three tickets completing, no halt", async () => {
+    const { root } = await makeRunRepo();
+    roots.push(root);
+    const configPath = path.join(root, ".detent/config.json");
+    const config = JSON.parse(readFileSync(configPath, "utf8")) as { budgets: Record<string, number> };
+    config.budgets = { ...config.budgets, spend_without_progress_floor_usd: 5, spend_without_progress_multiple: 1, spend_without_progress_sessions: 1 };
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+    for (const id of ["t1", "t2", "t3"]) addTicket(root, { id });
+    const priced = (stage: StageFn): StageFn => (spec) => ({ ...stage(spec), costEstimateUsd: 5 });
+    const outcome = await run({
+      root,
+      backend: new MockBackend({ implement: priced(implementGreen), review: priced(reviewApprove) }),
+      prompts: PROMPTS,
+      runId: "keeps-finishing",
+    });
+    /* Before PRDR-219: the second ticket's launch measured $10 since a mark of $0 and halted — exit 10. */
+    expect(outcome.exitCode).toBe(EXIT_OK);
+    for (const id of ["t1", "t2", "t3"]) expect(readTicket(root, id).state, id).toBe("DONE");
+  }, 60_000);
+});
+
+/** Audit of PRDR-219: the file is adopted only when it has MOVED PAST memory — never behind it. */
+describe("audit of PRDR-219: memory never falls behind the file", () => {
+  it("an older mark on disk does not lower the mark the breaker measures from", async () => {
+    const root = await fixture();
+    const journal = RunJournal.open(root);
+    try {
+      const ledger = new SpendLedger(root, journal, 0, { spend_without_progress_floor_usd: 10, spend_without_progress_multiple: 3, spend_without_progress_sessions: 1 });
+      for (let i = 0; i < 3; i += 1) {
+        ledger.record(`t${String(i)}`, 0, "implement", okResult({ costEstimateUsd: 4 }), "2026-08-18T10:00:00.000Z");
+      }
+      noteUnitComplete(root);
+      ledger.recordLaunch();
+      /* A stale write: an older mark lands on disk after the instance adopted the newer one. */
+      writeFileSync(
+        path.join(root, ".detent/state/progress.json"),
+        JSON.stringify({ spent: 0, unitCost: 0, advisoryAnnounced: false, breakerAnnounced: false }),
+      );
+      ledger.record("t3", 0, "implement", okResult({ costEstimateUsd: 4 }), "2026-08-18T10:00:00.000Z");
+      expect(() => ledger.recordLaunch(), "$4 since the $12 unit, not $16 since nothing").not.toThrow();
     } finally {
       journal.close();
     }

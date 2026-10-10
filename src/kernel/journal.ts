@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { stateDir } from "../fs/layout.js";
 import { ledgerRowSchema, transitionLineSchema, type LedgerRow, type TransitionLine } from "../schemas/records.js";
+import { scrub } from "./scrub.js";
 
 /**
  * T-041 — the run-level journals (F-1, N-5).
@@ -13,9 +14,20 @@ import { ledgerRowSchema, transitionLineSchema, type LedgerRow, type TransitionL
  * same root. Within-process, that discharges F-1's single-writer AC (R-8);
  * cross-process protection is NG4 ground, documented, not silently claimed.
  *
- * Every line is schema-validated before it is written: N-5 promises the run is
- * reconstructable from these files, which is only true if nothing malformed
- * ever lands in them.
+ * `appendTransition` and `appendLedger` schema-validate before they write:
+ * N-5 promises the run is reconstructable from these files, which is only true
+ * if nothing malformed ever lands in them. `appendTicketEvent` still does NOT
+ * validate — it takes `Record<string, unknown>`, and there is no schema for a
+ * ticket event to validate against; inventing one is a design change and needs
+ * its own ticket (N-6), not a line here.
+ *
+ * SEC-4 (PRDR-252): it does now SCRUB. The two halves of this gap were recorded
+ * together and only one of them was a leak. A probe recorded a 363-character
+ * `effort_settled.active` carrying a credential; `src/init/session.ts` writes a
+ * session's own `rawTail` through here as `tail`, and `referee-session.ts`
+ * scrubs every string it puts in a journal event while init scrubbed none. On
+ * the write, so the next writer inherits it — the argument PRDR-169 made and
+ * PRDR-252 had to make again for `writeTicket`.
  */
 
 const OPEN_ROOTS = new Set<string>();
@@ -76,27 +88,112 @@ export class RunJournal {
     this.assertOpen();
     const file = this.ticketJournalPath(ticketId);
     mkdirSync(path.dirname(file), { recursive: true });
-    appendFileSync(file, `${JSON.stringify(record)}\n`);
+    /**
+     * SEC-4 (PRDR-252): scrubbed on the serialized line, so no field is
+     * privileged and no writer has to remember. `JSON.stringify` has already
+     * escaped every newline by here, so a redaction cannot tear a JSONL record
+     * that F-3\u2032's readers then have to recover.
+     */
+    appendFileSync(file, `${scrub(JSON.stringify(record))}\n`);
   }
 
   /**
    * B-5: a `start` with no matching `end` means the process died mid-session.
    * The budget was consumed; the session may NOT relaunch, and the gate judges
    * the tree as-is.
+   *
+   * B-5′ (PRDR-131): scoped to the GENERATION, which this took no account of.
+   * The journal is per-ticket and the skip event rebalances nothing, so
+   * `starts > ends` stayed true for the ticket's whole life: one killed session
+   * suppressed that role forever. X-8 defines a new generation by zeroed
+   * counters, so B-5's premise — the budget was consumed — is simply false
+   * across one, and the ladder went on spending real money fixing an
+   * implementation that had never been written. Requeue, the documented
+   * remedy, could not clear it.
+   *
+   * An event with no `generation` was written before this was recorded at all;
+   * counting it toward generation 0 is the conservative reading, and preserves
+   * B-5 for the in-flight resume it was written for.
    */
-  unfinished(ticketId: string, role: string): boolean {
+  unfinished(ticketId: string, role: string, generation: number): boolean {
     const file = this.ticketJournalPath(ticketId);
     if (!existsSync(file)) return false;
     let starts = 0;
     let ends = 0;
     for (const line of readFileSync(file, "utf8").split("\n")) {
       if (line.trim() === "") continue;
-      const record = JSON.parse(line) as { stage?: string; event?: string };
+      /**
+       * F-3′ (PRDR-137): a torn line is skipped. This is read on the resume
+       * path a crash produces, and a crash is exactly what tears the last line
+       * of an append-only file — so an unguarded parse killed the recovery it
+       * exists to serve. `readRecordedSpend` guarded the identical parse with
+       * "a torn line cannot subtract money"; the journal readers were missed.
+       */
+      let record: { stage?: string; event?: string; generation?: unknown };
+      try {
+        record = JSON.parse(line) as typeof record;
+      } catch {
+        continue;
+      }
       if (record.stage !== role) continue;
+      if ((typeof record.generation === "number" ? record.generation : 0) !== generation) continue;
       if (record.event === "start") starts += 1;
-      else if (record.event === "end") ends += 1;
+      /**
+       * PRDR-234: the skip DISCHARGES the start it was written for.
+       *
+       * B-5 skips the launch that crashed, once. This counted only `start` and
+       * `end`, and the skip event is neither — so the imbalance that fired the
+       * skip survived it, and every later launch of that role in that
+       * generation was skipped in turn. B-5′ above fixed the SCOPE and left the
+       * imbalance exactly as it found it, which is why the sentence it wrote —
+       * "the skip event rebalanced neither" — still described the code.
+       *
+       * It hid because the ladder normally moves ON after a skip: blind_fix to
+       * research to informed_fix, different roles, separate tallies. The role
+       * the ladder RE-ENTERS is REVIEW_FIX, and on gate-313 that spent two of
+       * t-s01-012's three review-fix rounds on launches that never happened,
+       * re-reviewed an unchanged tree each time, and halted the run on a
+       * NEEDS_HUMAN whose finding no fixer had ever been handed.
+       *
+       * Counted here rather than by appending a synthetic `end`, because `end`
+       * carries `ok` and `cost` that every ledger and report reader trusts: a
+       * fabricated one would claim a session ran. The journal keeps saying,
+       * truthfully, that it did not.
+       */
+      else if (record.event === "end" || record.event === "skipped_after_crash") ends += 1;
     }
     return starts > ends;
+  }
+
+  /**
+   * X-8″ (PRDR-321): the conversation a usage limit stopped for `role` in
+   * `generation`, which its next launch resumes rather than starting the
+   * task over: the `stopped_by_limit` its last `end` recorded, with the turns
+   * the conversation has run so far. Null when its last session ended any
+   * other way, or none has run. A torn line is skipped, as `unfinished` skips
+   * one (F-3′).
+   */
+  stoppedConversation(ticketId: string, role: string, generation: number): { readonly sessionId: string; readonly turns: number } | null {
+    const file = this.ticketJournalPath(ticketId);
+    if (!existsSync(file)) return null;
+    let last: { readonly sessionId: string; readonly turns: number } | null = null;
+    for (const line of readFileSync(file, "utf8").split("\n")) {
+      if (line.trim() === "") continue;
+      let record: { stage?: unknown; event?: unknown; generation?: unknown; stopped_by_limit?: { session_id?: unknown; turns?: unknown } };
+      try {
+        record = JSON.parse(line) as typeof record;
+      } catch {
+        continue;
+      }
+      if (record.stage !== role || record.event !== "end") continue;
+      if ((typeof record.generation === "number" ? record.generation : 0) !== generation) continue;
+      const stopped = record.stopped_by_limit;
+      last =
+        typeof stopped?.session_id === "string" && stopped.session_id !== ""
+          ? { sessionId: stopped.session_id, turns: typeof stopped.turns === "number" ? stopped.turns : 0 }
+          : null;
+    }
+    return last;
   }
 }
 

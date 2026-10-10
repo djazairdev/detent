@@ -1,11 +1,19 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { createRequire } from "node:module";
 import { parseArgs } from "node:util";
 import { stateDir } from "../fs/layout.js";
 import { loadConfig, type LoadedConfig } from "../kernel/worstcase.js";
+import { buildLiveBackend, hasLiveBackendAuth } from "../sessions/live.js";
 import type { SessionBackend } from "../sessions/backend.js";
 import { researchTools } from "../sessions/guard.js";
+import { bundledRuntime, sdkManifest } from "../sessions/runtime.js";
+import { recordOutOfBandSpend } from "../kernel/ledger.js";
+import { readBindings } from "../adapter/drift.js";
+import { gateLabel } from "../adapter/packages.js";
+import { currentPlatform, missingToolchains } from "../adapter/toolchain.js";
+import { stateVersionRefusal } from "../kernel/migrate.js";
+import { supersededSentence, unservedSentence } from "../kernel/routing-advice.js";
+import { supersededRoutes, unservedRoutes } from "../schemas/roles.js";
 
 /**
  * T-050 — `detent doctor` (S-5, C-12, X-1, S-3).
@@ -16,6 +24,10 @@ import { researchTools } from "../sessions/guard.js";
  * authoritative over any quoted figure), the WebFetch rule forms, and — when
  * a key is present (R-10) — one live smoke session proving telemetry parses
  * end to end.
+ *
+ * The smoke is the only part of this command that spends, so it is the only
+ * part with a precondition: PRDR-253 gates it on the pin the other three
+ * spending entrypoints refuse on.
  */
 
 interface DoctorCheck {
@@ -32,42 +44,22 @@ export interface DoctorReport {
 export interface DoctorDeps {
   /** The live backend for the version check + smoke; injectable for tests. */
   readonly backend?: SessionBackend;
-  /** R-10: the smoke session runs only when a key (and a cap) is present. */
-  readonly env?: NodeJS.ProcessEnv;
   /** The installed SDK version; defaults to reading the package manifest. */
   readonly installedSdkVersion?: () => string;
+  /** S-5⁶ (PRDR-319): the Claude Code the SDK bundles; defaults to the manifest's `claudeCodeVersion`. */
+  readonly runtimeVersion?: () => string;
+  /**
+   * PRDR-276: the toolchain probe; the real one by default. A row that probes
+   * the host asserts whatever the host has, so its test passed only on a
+   * machine without Go — and would have failed on this one the moment the run
+   * it exists for installed Go.
+   */
+  readonly toolchainProbe?: (exe: string) => boolean;
 }
 
-/**
- * S-5: the installed agent-SDK version, for the pin check.
- *
- * PRDR-096: `require("@anthropic-ai/claude-agent-sdk/package.json")` threw —
- * the SDK's `exports` map does not expose `./package.json`, so Node refuses
- * the subpath and `doctor`, the command whose whole job is to report on the
- * environment, died reporting on it. Resolve the package's own entry point
- * instead and read the manifest beside it, which needs no exports entry. An
- * unreadable manifest returns "unknown" — the same honest value `init` records
- * for an unreadable CLI, and something the pin check can report rather than
- * crash on.
- */
+/** S-5: the installed agent-SDK version, for the pin check (PRDR-096: read beside the SDK's entry point). */
 function installedSdk(): string {
-  const require = createRequire(import.meta.url);
-  try {
-    let dir = path.dirname(require.resolve("@anthropic-ai/claude-agent-sdk"));
-    for (let up = 0; up < 8; up += 1) {
-      const candidate = path.join(dir, "package.json");
-      if (existsSync(candidate)) {
-        const manifest = JSON.parse(readFileSync(candidate, "utf8")) as { name?: string; version?: string };
-        if (manifest.name === "@anthropic-ai/claude-agent-sdk" && typeof manifest.version === "string") return manifest.version;
-      }
-      const parent = path.dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
-    }
-  } catch {
-    /* fall through to the honest unknown */
-  }
-  return "unknown";
+  return sdkManifest().version;
 }
 
 /** S-3/PRDR-050: a rule form the backend cannot parse must fail HERE, loudly. */
@@ -75,7 +67,6 @@ const WEBFETCH_RULE = /^WebFetch\(domain:[A-Za-z0-9.-]+\)$/;
 
 export async function doctor(root: string, deps: DoctorDeps = {}): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [];
-  const env = deps.env ?? process.env;
 
   /** ---- config loads; the computed worst case is reported (X-1) ------------- */
   let loaded: LoadedConfig | null = null;
@@ -98,7 +89,34 @@ export async function doctor(root: string, deps: DoctorDeps = {}): Promise<Docto
   }
 
   /** ---- SDK pin (S-5) ------------------------------------------------------- */
+  /**
+   * S-5 (PRDR-253): why a refusal and not a verdict on the pin row.
+   *
+   * The smoke session below spends and leaves a permanent ledger row, so it
+   * needs a pin that was VERIFIED — not one that merely failed to fail. Two
+   * states read alike from the `claude-code-pin` row and are not alike: a
+   * mismatch pushes `ok: false`, and an unloadable config pushes nothing at all
+   * because both pin checks sit inside `loaded !== null`. This starts refusing
+   * and is cleared only by a `checkVersion` that resolved.
+   */
+  let pinRefusal: string | null =
+    "the S-5 pin was never checked — no loadable config to read `pinned.claude_code` from";
   if (loaded !== null) {
+    /**
+     * S-5 (PRDR-254): reported, and deliberately not enforced — see
+     * `AGENT_SDK_PIN_SITES`, which names this module as the one reporter.
+     *
+     * The two values answer different questions. `ensureConfig` writes the pin
+     * once and never again, so config says which Detent initialised this
+     * project; `installedSdk()` resolves from Detent's own node_modules, so it
+     * says which SDK this Detent ships. They diverge on every Detent upgrade,
+     * which is an ordinary event and not one to refuse a run over.
+     *
+     * The text is therefore written for the person who will read it — an
+     * operator whose Detent moved. It used to end "upgrades are PRs gated on
+     * the fixture suite", which is instruction for whoever maintains Detent and
+     * names no action a project can take.
+     */
     const installed = (deps.installedSdkVersion ?? installedSdk)();
     const pinned = loaded.config.pinned.agent_sdk;
     checks.push({
@@ -107,21 +125,93 @@ export async function doctor(root: string, deps: DoctorDeps = {}): Promise<Docto
       detail:
         installed === pinned
           ? `pinned ${pinned} == installed ${installed}`
-          : `MISMATCH: pinned ${pinned}, installed ${installed} (S-5 — upgrades are PRs gated on the fixture suite)`,
+          : `MISMATCH: this project pins ${pinned}, this Detent ships ${installed} — the config was written by ` +
+            "a different Detent build and `init` never rewrites it. Advisory (S-5): the lockfile pins the SDK " +
+            `exactly and the release shipping ${installed} passed the N-7 gate, so nothing refuses on this; set ` +
+            `pinned.agent_sdk to ${installed} once you have re-verified this project against it`,
+    });
+
+    /**
+     * ---- routed models against the bundled runtime (S-5⁶, PRDR-319) ---------
+     * A session is served by the Claude Code the SDK bundles (S-5‴), and one
+     * routed to a model that runtime does not know runs on the runtime's
+     * default instead (PRDR-114): a failed row, naming each such role. A role
+     * on a default S-5⁶ superseded is the config's own choice as far as
+     * anything can tell (S-5′), so its row informs and never fails.
+     */
+    const runtime = (deps.runtimeVersion ?? bundledRuntime)();
+    const routing = loaded.config.model_routing;
+    const unserved = unservedRoutes(routing, runtime);
+    checks.push({
+      name: "routed-models",
+      ok: unserved !== null && unserved.length === 0,
+      detail:
+        unserved === null
+          ? `the bundled runtime's version could not be read from the SDK's manifest (${runtime}), so no routed model was judged (S-5⁶)`
+          : unserved.length > 0
+            ? unservedSentence(runtime, unserved)
+            : `the runtime this Detent bundles, Claude Code ${runtime}, serves every routed model it has a record of (S-5⁶)`,
+    });
+    const superseded = supersededRoutes(routing);
+    checks.push({
+      name: "superseded-models",
+      ok: true,
+      detail:
+        superseded.length === 0
+          ? "no role is routed to a model a newer default supersedes (S-5⁶)"
+          : supersededSentence(superseded, readFileSync(configPath, "utf8")),
     });
 
     /** ---- CLI pin (S-5), via the backend's own check ------------------------ */
     if (deps.backend !== undefined) {
       try {
         await deps.backend.checkVersion(loaded.config.pinned.claude_code);
+        pinRefusal = null;
         checks.push({ name: "claude-code-pin", ok: true, detail: `backend reports the pinned ${loaded.config.pinned.claude_code}` });
       } catch (err) {
+        pinRefusal = (err as Error).message;
         checks.push({ name: "claude-code-pin", ok: false, detail: (err as Error).message });
       }
     } else {
       checks.push({ name: "claude-code-pin", ok: true, detail: "no live backend supplied; checked at run time" });
     }
   }
+
+  /**
+   * ---- bound gates are runnable (PRDR-273) ---------------------------------
+   * This file's own contract is "the checks a run would otherwise discover
+   * mid-flight". On 2026-09-23 it reported five green rows against a machine
+   * with no Go toolchain, and the run then spent $2.74 and 50 turns learning
+   * what resolving one executable answers for nothing.
+   *
+   * PRDR-276: under `run`'s rule — only an executable the table knows is
+   * probed, so no project script is executed to answer this — and pointing at
+   * `run`, which installs on the operator's approval, rather than at a command
+   * for them to type.
+   */
+  let bound: { slot: string; resolved: string }[] = [];
+  try {
+    /* V-5′ (PRDR-295): every package's gates, each named with its package. */
+    bound = readBindings(root).bindings.map((b) => ({ slot: gateLabel(b), resolved: b.resolved }));
+  } catch {
+    /* PRDR-143: an unreadable bindings.json is its own row's business, not this one's — doctor still prints. */
+  }
+  const absent = bound.length === 0 ? [] : missingToolchains(bound, deps.toolchainProbe);
+  checks.push({
+    name: "toolchain",
+    ok: absent.length === 0,
+    detail:
+      bound.length === 0
+        ? "no bindings yet — nothing to resolve"
+        : absent.length === 0
+          ? `every toolchain Detent can install behind ${String(bound.length)} bound slot(s) runs`
+          : absent
+              .map(
+                (m) =>
+                  `\`${m.exe}\` (${m.slots.join(", ")}) does not run — \`detent run\` installs it on your approval: ${m.toolchain.install[currentPlatform()]}`,
+              )
+              .join("; "),
+  });
 
   /**
    * ---- WebFetch rule forms (S-3/PRDR-050) ---------------------------------
@@ -143,11 +233,55 @@ export async function doctor(root: string, deps: DoctorDeps = {}): Promise<Docto
   });
 
   /** ---- live smoke (R-10) --------------------------------------------------- */
-  if (env["ANTHROPIC_API_KEY"] === undefined || deps.backend === undefined) {
+  /**
+   * PRDR-141: keyed on `hasLiveBackendAuth`, not on `ANTHROPIC_API_KEY` alone.
+   * PRDR-140 broadened the transports to three — an API key, a
+   * `CLAUDE_CODE_OAUTH_TOKEN`, or a logged-in CLI — and this test never
+   * followed, so on a subscription machine the one check that would catch a
+   * broken transport was skipped and reported green. Found by checking what
+   * this dead branch CLAIMED against what the system now does, before wiring
+   * it: the same drift PRDR-148 was about.
+   */
+  /**
+   * PRDR-141: the BACKEND's presence is the liveness signal, decided at the
+   * entry point. This tested `env["ANTHROPIC_API_KEY"] === undefined`, which
+   * has been stale since PRDR-140 broadened the transports to three — so on a
+   * subscription machine the one check that would catch a broken transport was
+   * skipped and reported green. Keying on `hasLiveBackendAuth` HERE would have
+   * been little better: it falls through to probing the real CLI, so an
+   * injected environment cannot make it answer no. `main` decides, and passes a
+   * backend only when it decides yes.
+   */
+  if (deps.backend === undefined) {
     checks.push({
       name: "smoke-session",
       ok: true,
-      detail: "skipped: no ANTHROPIC_API_KEY / live backend (R-10) — the mock suite stays fully green without one",
+      detail: "skipped: no live backend (R-10) — the mock suite stays fully green without one",
+    });
+  } else if (pinRefusal !== null) {
+    /**
+     * S-5/X-1 (PRDR-253): the pin is ENFORCED on the path that spends.
+     *
+     * `doctor` checked the pin, pushed the row, and ran the session anyway —
+     * the only one of the four spending entrypoints that reported the mismatch
+     * instead of refusing it (`kernel/run.ts` PRDR-181, `cli/init.ts` and
+     * `cli/referee.ts` PRDR-251). A row recorded here counts against
+     * `run_spend_usd` on this root forever, so a drifted CLI billed the project
+     * permanently for a diagnostic.
+     *
+     * A failing row rather than an early return: this command's contract is
+     * `exitCode: 0 | 1` and its job is to report every check it can — PRDR-154
+     * exists because `doctor` once printed nothing at all on a broken state
+     * directory. And `ok: false` rather than a passing skip: the operator typed
+     * `--smoke` and got no smoke, which is exactly the shape PRDR-141 found
+     * here when both live checks pushed `ok: true` for work nobody did.
+     */
+    checks.push({
+      name: "smoke-session",
+      ok: false,
+      detail:
+        `not run: ${pinRefusal} — a smoke session spends real tokens and leaves a permanent ` +
+        "ledger row (X-1), so it is gated on the pin like every other path that spends (S-5)",
     });
   } else {
     try {
@@ -164,6 +298,29 @@ export async function doctor(root: string, deps: DoctorDeps = {}): Promise<Docto
         /** X-1″: the only session that carries a turn bound — a probe, one turn. */
         maxTurns: 1,
       });
+      /**
+       * X-1 (PRDR-173): a billed session leaves a row.
+       *
+       * This was the only one of the repo's three `backend.run` sites with no
+       * ledger wrapping — the file was not even created. PRDR-154's ticket
+       * names "no consent, no cap and no ledger row" as the problem and closed
+       * the first two. Recorded after the call, so a session that threw is not
+       * charged for tokens it never reported.
+       */
+      const row = recordOutOfBandSpend(root, "doctor-smoke", result, new Date().toISOString());
+      /**
+       * X-1 (PRDR-179): say that it counts, because it counts FOREVER.
+       *
+       * `readRecordedSpend` sums the whole file — "cumulative across
+       * generations AND across resumed invocations" — so a smoke row is
+       * subtracted from every future `detent run` on this root, not just the
+       * next one. PRDR-173 recorded the row and told nobody what recording it
+       * meant.
+       */
+      process.stderr.write(
+        `smoke session recorded $${row.cost_estimate_usd.toFixed(4)} to .detent/ledger.jsonl — ` +
+          "it counts against run_spend_usd for every later run on this root (X-1).\n",
+      );
       checks.push({
         name: "smoke-session",
         ok: result.telemetryParsed,
@@ -184,9 +341,72 @@ export function renderDoctor(report: DoctorReport): string {
   return `detent doctor\n${lines.join("\n")}\n`;
 }
 
-export async function main(argv: readonly string[]): Promise<number> {
-  const { positionals } = parseArgs({ args: [...argv], allowPositionals: true, options: {} });
-  const report = await doctor(positionals[0] ?? process.cwd());
+/**
+ * PRDR-158: the auth decision and the backend builder are seams.
+ *
+ * Without them the test that proves `doctor` survives an unreadable
+ * `bindings.json` only proves it on a machine that HAS live auth — everywhere
+ * else `hasLiveBackendAuth()` short-circuits, `buildLiveBackend` is never
+ * called, the corrupt fixture is never read, and the test passes having
+ * exercised nothing. That is the environment CI runs in.
+ *
+ * The second reason is spend. `main([root, "--smoke"])` was the one call in
+ * the suite reaching `buildLiveBackend` un-injected, and on the pristine
+ * fixture it SUCCEEDS — the only thing standing between `npm test` and a
+ * billed session was a corrupt-bindings fixture written for another purpose.
+ * A dependency is a seam; a fixture detail is a coincidence.
+ */
+export interface DoctorMainDeps {
+  readonly hasAuth?: () => boolean;
+  readonly buildBackend?: (root: string) => SessionBackend;
+}
+
+export async function main(argv: readonly string[], mainDeps: DoctorMainDeps = {}): Promise<number> {
+  const { positionals, values } = parseArgs({
+    args: [...argv],
+    allowPositionals: true,
+    options: { smoke: { type: "boolean", default: false } },
+  });
+  const root = positionals[0] ?? process.cwd();
+  /** F-3″ (PRDR-300): `doctor` does not migrate, so an older or newer state is refused before any check reads it. */
+  const refused = stateVersionRefusal(root);
+  if (refused !== null) {
+    process.stderr.write(`${refused}\n`);
+    return 2;
+  }
+  /**
+   * PRDR-141: supply the backend. `main` passed no `deps`, so `deps.backend`
+   * was always undefined on the only path a user can invoke — and both the S-5
+   * pin check and the R-10 smoke session pushed `ok: true` unconditionally
+   * while the CLI advertised "one live smoke session". Every test injected a
+   * backend, so the suite exercised only the branches `main` cannot reach.
+   */
+  /**
+   * PRDR-154, both halves found by auditing PRDR-141:
+   *
+   * - `buildLiveBackend` reads `bindings.json`, which THROWS on an invalid or
+   *   newer-schema file — so `doctor`, the one command you reach for when the
+   *   state directory is broken, became the one command that could not survive
+   *   a broken state directory. It printed nothing at all: no config check, no
+   *   pin check, no WebFetch check.
+   * - The smoke session spends real tokens. It is behind `--smoke` now, because
+   *   `doctor` was a free offline diagnostic and wiring it silently turned every
+   *   invocation on a logged-in machine into a billable one, with no consent, no
+   *   cap and no ledger row — while `live.ts` asserts R-10's gate is "consent
+   *   plus a cap". `hasLiveBackendAuth()` also spawns the `claude` CLI with a
+   *   10s timeout, so the probe itself only runs when asked for.
+   */
+  let deps: DoctorDeps = {};
+  if (values.smoke === true) {
+    const hasAuth = mainDeps.hasAuth ?? hasLiveBackendAuth;
+    const build = mainDeps.buildBackend ?? buildLiveBackend;
+    try {
+      deps = hasAuth() ? { backend: build(root) } : {};
+    } catch (err) {
+      process.stderr.write(`live checks unavailable: ${(err as Error).message}\n`);
+    }
+  }
+  const report = await doctor(root, deps);
   process.stdout.write(renderDoctor(report));
   return report.exitCode;
 }

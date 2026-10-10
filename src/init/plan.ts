@@ -1,17 +1,27 @@
-import { createHash } from "node:crypto";
 import type { Budgets } from "../schemas/budgets.js";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { stateDir } from "../fs/layout.js";
 import { parseArtifact } from "../schemas/common.js";
-import { planDraftSchema, type Analysis, type PlanDraftTicket, type PlanReview } from "../schemas/init.js";
-import { PLAN_REVISIONS, reviewPlan, sessionBudget } from "./plan-review.js";
-import { planSchema, type Binding, type Plan } from "../schemas/records.js";
-import { createTicket } from "../kernel/tickets/mutations.js";
-import { allTickets, readTicket } from "../kernel/tickets/readers.js";
-import { ticketPath } from "../kernel/tickets/paths.js";
-import type { Ticket } from "../schemas/ticket.js";
+import { planDraftSchema, type CheckFailure, type PlanDraftTicket, type ReviewFinding, type SliceSpec, type SpecDefect } from "../schemas/init.js";
+import { planSlices } from "./plan-slices.js";
+import { checkPlan, failureLine, type PlanContext } from "./plan-checks.js";
+import type { Gates } from "./plan-check-gates.js";
+import type { Binding } from "../schemas/records.js";
+import type { Skip } from "../adapter/bind.js";
+import type { Candidate } from "../adapter/discover/types.js";
+import { normalizeInvocation } from "../adapter/normalize.js";
+import { ROOT_PACKAGE, gateLabel } from "../adapter/packages.js";
+import { allTickets } from "../kernel/tickets/readers.js";
 import type { PhaseOutcome } from "./machine.js";
+import { withOneRelaunch } from "./retry.js";
+import type { Pack } from "../schemas/pack.js";
+import { wholeProduct } from "./slice.js";
+import { draftInputs, type PreviousDraft } from "./plan-inputs.js";
+import { draftIssues, openDefects } from "./plan-draft-checks.js";
+import { awaitingReplan } from "./replan-guard.js";
+
+export { planDraftSkeleton } from "./plan-inputs.js";
 
 /**
  * T-066 — PLAN generation and the bootstrap lifecycle (C-4, A-2).
@@ -51,248 +61,215 @@ type MappedDraftKeys =
   | "non_goals"
   | "surface"
   | "depends_on"
+  | "provides"
+  | "consumes"
+  | "requirement_ids"
+  | "baseline_ids"
+  | "criterion_ids"
   | "risk_label";
 type UnmappedDraftKeys = Exclude<keyof PlanDraftTicket, MappedDraftKeys>;
 /** Fails to compile the moment a drafted field is left unhandled. */
 const DRAFT_MAPPING_IS_TOTAL: UnmappedDraftKeys extends never ? true : never = true;
 void DRAFT_MAPPING_IS_TOTAL;
 
-export const BOOTSTRAP_TICKET_ID = "t-001-bootstrap";
+export { BOOTSTRAP_TICKET_ID } from "./plan-write.js";
+import { BOOTSTRAP_TICKET_ID, bootstrapScaffold, writePlan, type DraftedTicket, type WriteDeps } from "./plan-write.js";
+import type { Estimator } from "./progress.js";
 
 export function planDraftPath(root: string): string {
   return path.join(stateDir(root), "state", "plan-draft.json");
 }
 
-export function planPath(root: string): string {
-  return path.join(stateDir(root), "plan", "plan.json");
-}
-
 export interface PlanDeps {
   readonly root: string;
   readonly greenfield: boolean;
-  readonly analysis: Analysis | null;
+  /** D-10′ (PRDR-290): in greenfield, the stack entry the decision log records, which PLAN hands the writer; null in an existing project. */
+  readonly stack: WriteDeps["stack"];
   /** Repo-relative docs the plan derives from — hashed into A-2 (C-8). */
   readonly docs: readonly string[];
   /** Slots that actually bound, for the bootstrap ticket's criteria. */
   readonly boundSlots: readonly string[];
   /** PRDR-081: the budget a ticket must fit — the planner sizes against it. */
   readonly budgets: Budgets;
-  /** PRDR-084: the artifact path is per-launch — PLAN writes a draft, REVIEW_PLAN a verdict. */
-  readonly launch: (inputs: Record<string, unknown>, artifactOut?: string) => Promise<void>;
+  /** A drafting session on the planner role, writing the draft to `planDraftPath`. */
+  readonly launch: (inputs: Record<string, unknown>) => Promise<void>;
+  /** C-4⁸ (PRDR-294): a review session on the `plan_review` role, writing its verdict to `artifactOut`. */
+  readonly launchReview: (inputs: Record<string, unknown>, artifactOut: string) => Promise<void>;
   readonly note?: (text: string) => void;
+  /**
+   * PRDR-194: where work actually BEGINS, distinct from `note`.
+   *
+   * `note` carries verdicts, reuse status, drift explanations and warnings as
+   * well as progress, so a marker fed from it reports whichever came last — a
+   * spend announcement was recorded as what a run was doing. One seam, one job.
+   */
+  readonly progress?: (text: string) => void;
+  /** C-2‴ (PRDR-117): the increments SLICE cut; PLAN plans each in turn. Empty = one unnamed slice over `docs`. */
+  readonly slices?: readonly SliceSpec[];
+  /** C-2‴: the production baseline the plan must deliver, or "none" — written into the config. */
+  readonly baseline?: "production" | "none";
+  /** PRDR-082, C-4⁵ (PRDR-292): the hash of PLAN's and the review's prompts, folded into every slice's cache key. */
+  readonly promptHash?: string;
+  /** C-2⁸ (PRDR-291): the checker's parse VALIDATE handed on, whose records key each slice; null or absent where WRITE wrote no pack. */
+  readonly pack?: Pack | null;
+  /**
+   * V-5′, A-1⁷ (PRDR-293): the packages and what each binds, which the gates
+   * check reads. Absent, PLAN checks no gate, and PRESENT, which reads them
+   * from `.detent/bindings.json` itself, still holds approval on a path no
+   * gate can fail.
+   */
+  readonly gates?: Gates;
+  /** N-5⁗ (PRDR-325): what planning the slices will cost, said before it starts, and its progress. */
+  readonly estimate?: Estimator | undefined;
 }
 
 /**
- * The EXACT artifact shape PLAN must write (PRDR-067's sibling lesson from
- * T-140: prose contracts drift; `expected_output` plus a strict validator
- * does not). A test parses this skeleton through `planDraftSchema`.
+ * C-4⁗′ (PRDR-118): draft, and if the artifact is unusable, draft once more
+ * with the validator's own words. `planDraftSchema` is strict, so one stray
+ * key in one ticket of one slice would otherwise end a run that has already
+ * planned nineteen others.
  */
-export function planDraftSkeleton(): Record<string, unknown> {
-  return {
-    schema_version: 1,
-    tickets: [
-      {
-        id: "t-100",
-        type: "feature",
-        title: "<short imperative title — required>",
-        description: "<what and why — may be empty>",
-        acceptance_criteria: ["<testable criterion — at least one, non-empty>"],
-        non_goals: ["<explicitly out of scope — may be empty list>"],
-        surface: ["src/**", "tests/**"],
-        depends_on: [],
-        risk_label: false,
-      },
-    ],
-  };
+export async function draftAndRead(
+  deps: PlanDeps,
+  scope: DraftScope,
+): Promise<{ readonly tickets: PlanDraftTicket[]; readonly spec_defects: SpecDefect[] }> {
+  /* C-4⁵ (PRDR-292): a draft refused for what it says is relaunched as one, not told its content was sound. */
+  let refused = false;
+  const attempt = await withOneRelaunch<{ tickets: PlanDraftTicket[]; spec_defects: SpecDefect[] }>(
+    { stage: `PLAN${scope.slice === undefined ? "" : ` ${scope.slice.id}`}`, note: deps.note },
+    async (previous) => {
+      await draftPlan(deps, scope, previous === null ? null : { ...previous, refused });
+      try {
+        return { value: readValidatedDraft(deps.root, deps.pack ?? null), issue: null };
+      } catch (err) {
+        refused = err instanceof DraftRefusal;
+        return { value: null, issue: (err as Error).message };
+      }
+    },
+  );
+  if (attempt.value === null) {
+    throw new Error(`PLAN could not draft ${scope.slice === undefined ? "the plan" : `slice ${scope.slice.id} (${scope.slice.title})`}: ${attempt.issue ?? "no usable draft"}. Slices already planned are cached — re-run \`detent init\` to resume here (C-8).`);
+  }
+  return attempt.value;
 }
 
-/** One drafting launch. Called again with findings when the review asks (PRDR-084). */
-async function draftPlan(deps: PlanDeps, findings?: PlanReview["findings"]): Promise<void> {
+export interface DraftScope {
+  readonly slice?: SliceSpec;
+  readonly planIndex?: readonly DraftedTicket[];
+  /** C-4⁸ (PRDR-294): the blockers and majors a slice's review found in `draft`, which its one revision answers. */
+  readonly findings?: readonly ReviewFinding[];
+  /** Ids later slices depend on; a redraft keeps them or is discarded (`plan-cross.ts`). */
+  readonly keepIds?: readonly string[];
+  /** A-1⁷ (PRDR-293): what the checks proved wrong in `draft`, which this redraft fixes. */
+  readonly failures?: readonly CheckFailure[];
+  /** The slice's last draft, which a redraft (A-1⁷) or a revision (C-4⁸) keeps where what it is handed does not reach. */
+  readonly draft?: readonly DraftedTicket[];
+}
+
+/** One drafting launch: the whole pack, or one slice of it (C-2‴). Called again with what the checks proved (A-1⁷) or the review graded blocker or major (C-4⁸). */
+export async function draftPlan(deps: PlanDeps, scope: DraftScope = {}, previous: PreviousDraft | null = null): Promise<void> {
   /* A re-run derives fresh (C-8); a stale draft is an echo chamber, not an input. */
   rmSync(planDraftPath(deps.root), { force: true });
-
-  await deps.launch({
-    stage: "PLAN",
-    analysis: deps.analysis,
-    docs: deps.docs,
-    greenfield: deps.greenfield,
-    bound_slots: deps.boundSlots,
-    /**
-     * PRDR-081: the planner sizes tickets against the budget that will
-     * actually execute them. Without it the plan mirrors its documents'
-     * altitude — a PRD in, PRD-sized epics out, each far past what one
-     * session can finish or a gate can verify.
-     */
-    session_budget: sessionBudget(deps.budgets),
-    ...(findings === undefined ? {} : { review_findings: findings }),
-    expected_output: planDraftSkeleton(),
-    instruction: `${
-      deps.greenfield
-        ? "Draft the feature tickets. Do NOT draft a scaffolding or setup ticket — Detent adds the bootstrap ticket itself and blocks everything on it."
-        : "Draft the tickets. Each needs non-empty, testable acceptance criteria and an explicit surface."
-    } Size every ticket to ONE implement session inside \`session_budget\`, and order the plan as vertical slices (walking skeleton first), never as infrastructure layers completed ahead of the first end-to-end path. Write EXACTLY the \`expected_output\` shape to artifact_out — a top-level object with \`schema_version\` and \`tickets\` only; the validator is strict and refuses unknown keys (P2).${
-      findings === undefined ? "" : " A previous draft drew the `review_findings` in your inputs — address every one of them in this draft."
-    }`,
-  });
+  await deps.launch(draftInputs(deps, scope, previous));
 }
 
+/**
+ * C-2‴ (PRDR-117): PLAN runs to the end of the product. Each slice in turn
+ * is drafted, checked, read once and revised where the read asks
+ * (`planSlices`, C-4⁸, PRDR-294), and after every slice the checks run across
+ * the plan so far (A-1⁷, PRDR-293); only then are tickets written —
+ * bootstrap first, cross-slice order enforced, orphans removed. No stage here
+ * asks a human anything, and none asks at all (C-3⁗): what a draft finds the
+ * pack leaves open rides to PRESENT as a spec defect (C-4⁵), and what the
+ * checks still find there holds approval.
+ *
+ * The whole-plan model review is gone (A-1⁷). Its prompt carried every ticket
+ * of every slice and outgrew its context on ksar-cloud's 547, and what it was
+ * handed that code had proved it was told to treat as handled.
+ */
 export async function planStage(deps: PlanDeps): Promise<PhaseOutcome> {
-  await draftPlan(deps);
-  let drafted = readValidatedDraft(deps.root);
-
+  const slices: readonly SliceSpec[] = deps.slices !== undefined && deps.slices.length > 0 ? deps.slices : [wholeProduct(deps.docs)];
+  const context = planContext(deps);
+  const planned = await planSlices(deps, slices, context);
   /**
-   * PRDR-084 — the plan's own D-6. A fresh session judges the draft against
-   * the five properties a plan can be wrong about; a `changes` verdict buys
-   * exactly one revision (see PLAN_REVISIONS), and whatever the reviewer still
-   * faults after that rides to PRESENT as a note for the human, rather than
-   * the machine grinding on a judgment call.
+   * A-1‴ (PRDR-120): the declarations are checked by code, after every model
+   * has had its say and before a ticket reaches disk. A provider the plan does
+   * not already order before its consumer becomes an EDGE, derived from the
+   * coupling rather than guessed. What still fails after the redrafts is the
+   * operator's: PRESENT checks the tickets again as they stand, and holds
+   * approval while any fails (A-1⁷).
    */
-  const review = await reviewPlan(deps, drafted);
-  if (review === null) {
-    deps.note?.("plan review produced no artifact — the draft stands unreviewed (PRDR-084)");
-  } else if (review.verdict === "changes" && review.findings.length > 0) {
-    deps.note?.(`plan review: ${review.findings.length} finding(s) — ${review.findings.map((f) => f.tag).join(", ")}`);
-    for (let round = 0; round < PLAN_REVISIONS; round += 1) {
-      await draftPlan(deps, review.findings);
-      drafted = readValidatedDraft(deps.root);
-    }
-    const second = await reviewPlan(deps, drafted);
-    if (second !== null && second.verdict === "changes" && second.findings.length > 0) {
-      deps.note?.(
-        `plan review after revision: ${second.findings.length} finding(s) remain — ` +
-          `${second.findings.map((f) => `${f.tag}${f.ticket === undefined ? "" : ` (${f.ticket})`}`).join("; ")}`,
-      );
-    } else {
-      deps.note?.("plan review: revision accepted");
-    }
-  } else {
-    deps.note?.("plan review: approve");
+  const final = checkPlan(context, planned.tickets);
+  const drafted = final.tickets;
+  for (const d of final.derived) {
+    deps.note?.(`${d.consumer} → ${d.provider}: edge derived from \`${d.contract}\` (A-1‴)`);
+  }
+  if (final.failures.length > 0) {
+    deps.note?.(`checks: ${String(final.failures.length)} failure(s) remain after the redrafts, for the operator at PRESENT — ${final.failures.map(failureLine).join("; ")} (A-1⁷)`);
   }
 
   const ids = new Set(drafted.map((t) => t.id));
-  if (ids.size !== drafted.length) throw new Error("PLAN drafted duplicate ticket ids");
+  if (ids.size !== drafted.length) throw new Error("PLAN drafted duplicate ticket ids across slices");
   if (ids.has(BOOTSTRAP_TICKET_ID)) throw new Error(`PLAN drafted ${BOOTSTRAP_TICKET_ID}; the bootstrap ticket is Detent's (C-4)`);
   for (const ticket of drafted) {
     for (const dep of ticket.depends_on) {
       if (!ids.has(dep)) throw new Error(`ticket ${ticket.id} depends on unknown ticket ${dep}`);
     }
   }
-
-  /** ---- C-4: greenfield gets bootstrap #1, and everything blocks on it ------ */
-  const written: Ticket[] = [];
-  if (deps.greenfield) {
-    written.push(createBootstrapTicket(deps));
-    deps.note?.(`bootstrap ticket ${BOOTSTRAP_TICKET_ID} created; every other ticket is blocked on it (C-4)`);
-  }
+  /* C-8⁵ (PRDR-286): under an applied amendment, a slice not planned again keeps its tickets as they stand, and so does the bootstrap. */
+  const keep = awaitingReplan(deps.root).length === 0 ? new Set<string>() : new Set([BOOTSTRAP_TICKET_ID, ...drafted.filter((t) => !planned.replanned.includes(t.slice)).map((t) => t.id)]);
+  const written = writePlan(deps, drafted, slices, keep);
 
   /**
-   * PRDR-085: DONE work is not re-planned. Its code is committed and its
-   * record is real; a redraft reusing the id would reset it to READY and send
-   * a session to rebuild what already exists.
+   * C-4⁸ (PRDR-294): the review's minors, with A-1″'s repairs of the drafts
+   * that stand. A finding that names a ticket a later draft has since replaced
+   * keeps its slice, so it can be found.
    */
-  const done = new Set(allTickets(deps.root).filter((t) => t.state === "DONE").map((t) => t.id));
-  for (const draft of drafted) {
-    if (done.has(draft.id)) {
-      deps.note?.(`${draft.id} is DONE — preserved, not re-planned (PRDR-085)`);
-      written.push(readTicket(deps.root, draft.id));
-      continue;
-    }
-    const blockers = deps.greenfield ? [BOOTSTRAP_TICKET_ID, ...draft.depends_on] : [...draft.depends_on];
-    written.push(
-      createTicket(deps.root, {
-        id: draft.id,
-        type: draft.type,
-        title: draft.title,
-        description: draft.description,
-        acceptance_criteria: draft.acceptance_criteria,
-        /**
-         * PRDR-101: the draft always carried `non_goals` and this call did not
-         * copy it, so the schema defaulted it to `[]` and every ticket in every
-         * plan reached the implementer and the reviewer with its boundaries
-         * stripped. Silent, because an empty list is legal.
-         */
-        non_goals: draft.non_goals,
-        surface: draft.surface,
-        blockers,
-        risk_label: draft.risk_label,
-      }),
-    );
-  }
-
-  /**
-   * PRDR-085: tickets the new plan does not name are orphans — a replan that
-   * shrinks 32 tickets to 15 used to leave the other 17 on disk, READY and
-   * claimable, so `run` would build work no plan asked for. DONE tickets are
-   * never orphans: they are carried above and their record stands.
-   */
-  const planned = new Set(written.map((t) => t.id));
-  for (const existing of allTickets(deps.root)) {
-    if (planned.has(existing.id) || existing.state === "DONE") continue;
-    rmSync(ticketPath(deps.root, existing.id), { force: true });
-    deps.note?.(`${existing.id} removed — the new plan does not contain it (PRDR-085)`);
-  }
-
-  /** ---- A-2: the plan artifact ------------------------------------------- */
-  const plan: Plan = planSchema.parse({
-    schema_version: 1,
-    tickets: written.map((t) => t.id),
-    edges: written.flatMap((t) => t.blockers.map((b) => ({ from: b, to: t.id }))),
-    /* PREPARE_AGENTS fills these (T-067) */
-    assignments: {},
-    input_doc_hashes: Object.fromEntries(
-      deps.docs.map((doc) => [doc, hashFile(path.join(deps.root, ...doc.split("/")))]),
+  const live = new Set(drafted.map((t) => t.id));
+  const held = planned.findings.flatMap((r) =>
+    r.findings.map((f) =>
+      /* Keep the slice: a plan-wide finding names no ticket, and "which of twenty-five" is the first thing a reader asks. */
+      f.ticket !== undefined && live.has(f.ticket) ? f : { ...f, finding: `[${r.slice}] ${f.finding}` },
     ),
-  });
-  writeFileSync(planPath(deps.root), `${JSON.stringify(plan, null, 2)}\n`);
-
+  );
+  /**
+   * A-1⁵ (PRDR-201), A-1⁷ (PRDR-293): the checks' failures are NOT in this
+   * list. What a check proves is not a judgement for a session to weigh: it
+   * holds approval until the pack or the tickets answer it, and PRESENT names
+   * each one from the tickets as they stand.
+   */
+  const findings = [...held, ...written.findings];
   return {
     kind: "complete",
     outputs: {
-      tickets: written.map((t) => t.id),
-      bootstrap: deps.greenfield ? BOOTSTRAP_TICKET_ID : null,
-      plan: plan as unknown as Record<string, unknown>,
+      ...written,
+      /* C-4⁵ (PRDR-292): each open one holds approval at PRESENT until the pack is amended. */
+      spec_defects: openDefects(deps.pack ?? null, planned.spec_defects) as unknown as Record<string, unknown>[],
+      review_findings: findings as unknown as Record<string, unknown>[],
+      /* C-4⁸ (PRDR-294): the blockers and majors each revision was sent, and the slices no review read, for the operator at PRESENT. */
+      review_risks: planned.risks as unknown as Record<string, unknown>[],
+      unreviewed: planned.unreviewed as unknown as Record<string, unknown>[],
+      derived_edges: final.derived as unknown as Record<string, unknown>[],
+      /* C-8⁵ (PRDR-286): the slices this run planned again, which an applied amendment is marked with. */
+      replanned: planned.replanned,
     },
   };
 }
 
 /**
- * C-4's bootstrap ticket, constructed rather than drafted. Its criteria name
- * every slot that bound, because "prove every bound slot executes green" is
- * the ticket's actual job — and F-2 is stated in its non-goals so the session
- * working it cannot mistake `.detent/` for a place project config may live.
+ * A-1⁷ (PRDR-293): what PLAN's checks read besides the tickets: the slices as
+ * SLICE assigned them (none where no slice was cut, since then nothing was
+ * assigned), the pack, the bootstrap's scaffold (A-1⁶), the gates, and the
+ * work already DONE, which provides its names and is sent no redraft.
  */
-function createBootstrapTicket(deps: PlanDeps): Ticket {
-  const stack = deps.analysis?.stack;
-  const slots = deps.boundSlots.length > 0 ? deps.boundSlots : ["test"];
-  return createTicket(deps.root, {
-    id: BOOTSTRAP_TICKET_ID,
-    type: "feature",
-    title: "Bootstrap: project scaffolding and native verification tooling",
-    description: [
-      "Create the project scaffolding and establish its native verification tooling.",
-      stack === undefined || stack === null
-        ? ""
-        : `Stack chosen at ANALYZE: ${stack.language}${stack.runtime === "" ? "" : ` on ${stack.runtime}`}` +
-          `${stack.test_framework === "" ? "" : `, tested with ${stack.test_framework}`}. ${stack.rationale}`,
-      "",
-      "Configuration you create here is ticket work product, reviewed as code (C-4) — it lives in project files, never in `.detent/` (F-2).",
-    ]
-      .filter((l) => l !== "")
-      .join("\n"),
-    acceptance_criteria: [
-      "The project's own verification commands exist in project files (not `.detent/`).",
-      ...slots.map((slot) => `The \`${slot}\` gate runs and exits 0.`),
-      "A reader can run the project's tests from a fresh clone using only its native tooling.",
-    ],
-    non_goals: [
-      "Detent's own state directory `.detent/` holds no project configuration (F-2).",
-      "No feature work — this ticket establishes the ground the other tickets stand on.",
-    ],
-    /* scaffolding necessarily touches the whole tree */
-    surface: ["**"],
-    /* claimed first */
-    priority: 100,
-  });
+export function planContext(deps: PlanDeps): PlanContext {
+  return {
+    slices: deps.slices ?? [],
+    pack: deps.pack ?? null,
+    scaffold: bootstrapScaffold(deps.greenfield, deps.stack),
+    gates: deps.gates,
+    done: allTickets(deps.root).filter((t) => t.state === "DONE"),
+  };
 }
 
 /*
@@ -311,23 +288,23 @@ function createBootstrapTicket(deps: PlanDeps): Ticket {
  * (`greenfield:typescript`) and never discovered, because the tooling did not
  * exist; bootstrap #1 has just created it, so the real binding — with the
  * real config region that V-3 will watch — is what discovery finds NOW. The
- * slot is the only thing carried across.
+ * package and the slot are what is carried across (V-5′, PRDR-295): a
+ * package's binding is promoted from what discovery finds in that package.
+ *
+ * The command stored is the one a gate RUNS, as `bindSlot` stores it: the
+ * candidate normalized for invocation (V-4). Stored raw, a scaffold whose
+ * `test` script is a runner that watches by default was stored as `npm run
+ * test` and compared, before its first gate, with `npm run test -- --run`:
+ * drift on a tree nothing had changed.
  */
 export function finalizeBootstrap(
   root: string,
   ticketId: string,
   deps: {
-    readonly readBindings: () => { bindings: readonly Binding[]; skips: readonly unknown[] };
-    readonly writeBindings: (file: { bindings: Binding[]; skips: unknown[] }) => void;
-    /** Candidates discoverable now, after bootstrap created the tooling. */
-    readonly rediscover: () => readonly {
-      slot: string;
-      adapter: string;
-      ref: string;
-      resolved: string;
-      config_hash: string;
-      pm: string | null;
-    }[];
+    readonly readBindings: () => { readonly packages?: readonly string[]; readonly bindings: readonly Binding[]; readonly skips: readonly Skip[] };
+    readonly writeBindings: (file: { packages?: string[]; bindings: Binding[]; skips: Skip[] }) => void;
+    /** Candidates discoverable now, after bootstrap created the tooling, each with the package it was found in; none named is the root. */
+    readonly rediscover: () => readonly (Candidate & { readonly package?: string })[];
     readonly now?: () => string;
     readonly note?: (text: string) => void;
   },
@@ -347,14 +324,14 @@ export function finalizeBootstrap(
       finalized.push(binding);
       continue;
     }
-    const now = candidates.find((c) => c.slot === binding.slot);
+    const now = candidates.find((c) => (c.package ?? ROOT_PACKAGE) === binding.package && c.slot === binding.slot);
     if (now === undefined) {
       /*
        * Bootstrap's gates passed, so SOMETHING ran — but nothing discoverable
        * backs this slot. Keeping it provisional is the honest record: an
        * approved binding with no config region has no baseline to drift from.
        */
-      unresolved.push(binding.slot);
+      unresolved.push(gateLabel(binding));
       finalized.push(binding);
       continue;
     }
@@ -362,7 +339,7 @@ export function finalizeBootstrap(
       ...binding,
       adapter: now.adapter,
       ref: now.ref,
-      resolved: now.resolved,
+      resolved: normalizeInvocation(now).command,
       config_hash: now.config_hash,
       ...(now.pm === null ? {} : { pm: now.pm }),
       executed_at: at,
@@ -370,7 +347,7 @@ export function finalizeBootstrap(
     });
   }
 
-  deps.writeBindings({ bindings: finalized, skips: [...file.skips] });
+  deps.writeBindings({ ...(file.packages === undefined ? {} : { packages: [...file.packages] }), bindings: finalized, skips: [...file.skips] });
   const promoted = provisional.length - unresolved.length;
   deps.note?.(
     `bootstrap complete: ${promoted} provisional binding(s) finalized with drift baselines (C-4)${ 
@@ -379,14 +356,10 @@ export function finalizeBootstrap(
   return true;
 }
 
-/** Whether a ticket is claimable given C-4's bootstrap blocking. */
-export function bootstrapBlocks(root: string, ticketId: string): boolean {
-  if (ticketId === BOOTSTRAP_TICKET_ID) return false;
-  if (!existsSync(path.join(stateDir(root), "plan", `${BOOTSTRAP_TICKET_ID}.json`))) return false;
-  return readTicket(root, BOOTSTRAP_TICKET_ID).state !== "DONE";
-}
+/** C-4⁵ (PRDR-292): a draft refused for what it says of the pack, not for its shape. */
+export class DraftRefusal extends Error {}
 
-function readValidatedDraft(root: string): PlanDraftTicket[] {
+export function readValidatedDraft(root: string, pack: Pack | null): { readonly tickets: PlanDraftTicket[]; readonly spec_defects: SpecDefect[] } {
   const raw = readDraft(root);
   const parsed = raw === null ? null : parseArtifact(planDraftSchema, raw);
   if (parsed === null || !parsed.ok) {
@@ -396,7 +369,9 @@ function readValidatedDraft(root: string): PlanDraftTicket[] {
         : `PLAN produced an invalid draft: ${parsed.reason === "invalid" ? parsed.issues.join("; ") : "newer schema"}`,
     );
   }
-  return [...parsed.value.tickets];
+  const issues = draftIssues(root, pack, parsed.value);
+  if (issues.length > 0) throw new DraftRefusal(`PLAN's draft was refused: ${issues.join("; ")}`);
+  return { tickets: [...parsed.value.tickets], spec_defects: [...parsed.value.spec_defects] };
 }
 
 function readDraft(root: string): unknown {
@@ -410,10 +385,5 @@ function readJson(file: string): unknown {
   } catch {
     return null;
   }
-}
-
-function hashFile(abs: string): string {
-  if (!existsSync(abs)) return createHash("sha256").update("").digest("hex");
-  return createHash("sha256").update(readFileSync(abs)).digest("hex");
 }
 

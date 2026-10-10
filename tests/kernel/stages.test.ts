@@ -1,4 +1,4 @@
-import { readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CEILINGS } from "../../src/schemas/budgets.js";
@@ -23,6 +23,7 @@ import {
   reviewChanges,
   writeArtifactStage,
 } from "./run-fixture.js";
+import { SCHEMA_VERSION } from "../../src/schemas/common.js";
 
 /**
  * T-043 (diagnosis gate), T-044 (review routing), T-045 (research cache) —
@@ -47,7 +48,7 @@ const opts = (root: string, backend: MockBackend) => ({ root, backend, prompts: 
 const diagnoseAsPredicted: StageFn = (spec) => {
   writeTree(spec.cwd, { ".fail": FAIL_OUTPUT });
   return writeArtifactStage({
-    schema_version: 1,
+    schema_version: SCHEMA_VERSION,
     claim: "totals drops the seed row",
     evidence: [{ file: "src/calc.py", line: 2, what: "sum only" }],
     repro_test: "sh scripts/test.sh",
@@ -100,7 +101,7 @@ describe("T-043 X-4: the kernel executes the repro", () => {
 
     /** The repro PASSES — the hypothesis never verifies (X-4). */
     const wrongHypothesis = writeArtifactStage({
-      schema_version: 1,
+      schema_version: SCHEMA_VERSION,
       claim: "lint is broken",
       evidence: [{ file: "scripts/lint.sh", line: 1, what: "exit 0" }],
       repro_test: "sh scripts/lint.sh",
@@ -205,7 +206,7 @@ describe("T-044 review routing (D-6, A-5)", () => {
     const root = await fixture();
     addTicket(root, { id: "t1" });
 
-    const malformed = writeArtifactStage({ schema_version: 1, verdict: "changes", changes: [] });
+    const malformed = writeArtifactStage({ schema_version: SCHEMA_VERSION, verdict: "changes", changes: [] });
     const backend = new MockBackend({ implement: implementGreen, review: malformed });
     const outcome = await run(opts(root, backend));
 
@@ -256,7 +257,7 @@ describe("T-045 research cache (X-6, D-18)", () => {
 
     const upstreamBrief: StageFn = (spec) =>
       writeArtifactStage({
-        schema_version: 1,
+        schema_version: SCHEMA_VERSION,
         failure_signature: "0".repeat(64),
         cache_key: "1".repeat(64),
         root_cause: { claim: "vendored parser bug", confidence: "high" },
@@ -295,7 +296,7 @@ describe("T-045 research cache (X-6, D-18)", () => {
 
     writeTree(path.dirname(briefCachePath(root, key)), {
       [path.basename(briefCachePath(root, key))]: JSON.stringify({
-        schema_version: 1,
+        schema_version: SCHEMA_VERSION,
         failure_signature: signature,
         cache_key: key,
         root_cause: { claim: "stale", confidence: "low" },
@@ -312,10 +313,11 @@ describe("T-045 research cache (X-6, D-18)", () => {
       root,
       launch: async () => {
         launches += 1;
+        return 1;
       },
       readArtifact: () => null,
       readFailureSignature: () => signature,
-      toolCallCeiling: 8,
+      budgets: { failure_research_tool_calls: 8 },
       note: () => {},
       /* same lockfile+runtime → same KEY, contradicting facts */
       env: async () => envB,
@@ -325,6 +327,99 @@ describe("T-045 research cache (X-6, D-18)", () => {
     /** the hit was refused; a live session ran */
     expect(launches).toBe(1);
     expect(outcome.cached).toBe(false);
+  });
+
+  /**
+   * X-1 (PRDR-265) — the ceiling is read back and REPORTED, and the brief is
+   * judged on its own merits.
+   *
+   * PRDR-250 made an over-ceiling session RESEARCH_DRY and kept its brief out
+   * of the cache, on the reasoning that the tokens were spent regardless and
+   * what remained in reach was whether the result got trusted. This asserted
+   * that. It is inverted here because the trade was a bad one: a sound brief,
+   * already paid for, was thrown away over a number that orders nothing — and
+   * `failure_research_tool_calls` is a budget, not a sequencer.
+   *
+   * What replaces it is the note, asserted below. Turns are still the proxy for
+   * calls on init's precedent (S-4's telemetry has no per-call counter), and
+   * the figure still reaches the prompt as `tool_call_ceiling`.
+   */
+  it("an over-ceiling research session keeps its brief, and its overrun is reported", async () => {
+    const root = await fixture();
+    const signature = "a".repeat(64);
+    const env: EnvFingerprint = {
+      ecosystems: [],
+      lockfile_hash: "c".repeat(64),
+      runtime_version: "node 22.0.0",
+      version_facts: {},
+    };
+    const brief = {
+      schema_version: SCHEMA_VERSION,
+      failure_signature: signature,
+      cache_key: cacheKey(signature, env),
+      root_cause: { claim: "found it", confidence: "high" },
+      evidence: [{ source: "src/x.py", claim: "here" }],
+      version_facts: {},
+      recommended_fix: { strategy: "do the thing" },
+      what_would_falsify: "it stays red",
+      local_search: { docs_checked: ["a"], code_checked: [] },
+    };
+
+    const said: string[] = [];
+    const outcome = await researchStage({
+      root,
+      launch: async () => CEILINGS.failure_research_tool_calls.default + 1,
+      readArtifact: () => brief,
+      readFailureSignature: () => signature,
+      budgets: { failure_research_tool_calls: CEILINGS.failure_research_tool_calls.default },
+      note: (t) => said.push(t),
+      env: async () => env,
+      ticketInputs: {},
+    });
+
+    expect(outcome.event.event, "the turn count is not a verdict on the brief").toBe("RESEARCH_VALID");
+    expect(
+      existsSync(briefCachePath(root, cacheKey(signature, env))),
+      "and a brief the validator accepted is worth caching, whatever it cost to get",
+    ).toBe(true);
+    const ceiling = CEILINGS.failure_research_tool_calls.default;
+    expect(said.join(" "), "the operator is told the turns and the figure they were measured against").toContain(
+      `${String(ceiling + 1)} turns against a stated ceiling of ${String(ceiling)}`,
+    );
+    expect(said.join(" "), "and that this one went past it").toContain("OVER");
+  });
+
+  it("a research session inside its ceiling is unaffected", async () => {
+    const root = await fixture();
+    const signature = "b".repeat(64);
+    const env: EnvFingerprint = {
+      ecosystems: [],
+      lockfile_hash: "d".repeat(64),
+      runtime_version: "node 22.0.0",
+      version_facts: {},
+    };
+    const outcome = await researchStage({
+      root,
+      launch: async () => CEILINGS.failure_research_tool_calls.default,
+      readArtifact: () => ({
+        schema_version: SCHEMA_VERSION,
+        failure_signature: signature,
+        cache_key: cacheKey(signature, env),
+        root_cause: { claim: "found it", confidence: "high" },
+        evidence: [{ source: "src/x.py", claim: "here" }],
+        version_facts: {},
+        recommended_fix: { strategy: "do the thing" },
+        what_would_falsify: "it stays red",
+        local_search: { docs_checked: ["a"], code_checked: [] },
+      }),
+      readFailureSignature: () => signature,
+      budgets: { failure_research_tool_calls: CEILINGS.failure_research_tool_calls.default },
+      note: () => {},
+      env: async () => env,
+      ticketInputs: {},
+    });
+
+    expect(outcome.event.event, "at the ceiling is inside it").toBe("RESEARCH_VALID");
   });
 
   it("a changed lockfile is a different key — fresh research, never the old brief (D-18)", () => {

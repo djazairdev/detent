@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { parseArtifact } from "../schemas/common.js";
+import { SCHEMA_VERSION, parseArtifact } from "../schemas/common.js";
 import { checkpointSchema, type Checkpoint } from "../schemas/records.js";
 import { stateDir } from "./layout.js";
 
@@ -36,6 +36,22 @@ class UnknownPhaseError extends Error {
   }
 }
 
+/**
+ * PRDR-141 — DEFERRED, and recorded rather than left silent.
+ *
+ * `resumePlan`, `withCheckpoint` and `inputsHash` below have no production
+ * caller: `init/machine.ts` implements its own resume walk with a DIFFERENT
+ * hash scheme (`carried\0phase\0digest` against `carried\0phase\n` plus a
+ * sorted `rel\0digest\n`). Two implementations of C-8, one of them tested,
+ * free to diverge with nothing failing — and the tests over this half inflate
+ * the apparent coverage of the C-8 claim, which is covered for real by
+ * `tests/init/machine.test.ts` and `tests/init/slicing-scale.test.ts`.
+ *
+ * Collapsing them is the right fix and is NOT a deletion: the two schemes must
+ * first be shown to agree, or the difference decided. That is a careful change
+ * with its own falsification, not a line to squeeze into a wiring phase. It
+ * belongs with PRDR-144.
+ */
 export function checkpointPath(root: string, phase: string): string {
   if (!PHASE_NAME.test(phase)) throw new Error(`unsafe phase name: ${phase}`);
   return path.join(stateDir(root), "state", `${phase}.json`);
@@ -101,6 +117,8 @@ export function readCheckpoint(root: string, phase: string, expected: string): C
 
 export interface SaveOptions {
   readonly at?: string;
+  /** N-5″ (PRDR-297): the Detent build writing it (`kernel/build.ts`), which PRESENT names. */
+  readonly build?: string;
 }
 
 /** Persist a phase's outputs against the hash of what produced them (A-7). */
@@ -112,11 +130,12 @@ export function writeCheckpoint(
   opts: SaveOptions = {},
 ): Checkpoint {
   const checkpoint = checkpointSchema.parse({
-    schema_version: 1,
+    schema_version: SCHEMA_VERSION,
     phase,
     inputs_hash: hash,
     outputs,
     at: opts.at ?? new Date().toISOString(),
+    ...(opts.build === undefined ? {} : { build: opts.build }),
   });
   const file = checkpointPath(root, phase);
   mkdirSync(path.dirname(file), { recursive: true });

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { MANIFEST_PATH, PROMPTS_DIR, promptHash, renderManifest } from "../../scripts/hash-prompts.js";
-import { READ_ONLY_ROLES, ROLE_FOR_STATE, ROLE_IDS } from "../../src/schemas/roles.js";
+import { PROMPT_IDS, READ_ONLY_ROLES, ROLE_FOR_STATE, ROLE_IDS, type PromptId } from "../../src/schemas/roles.js";
 import { assignmentsFileSchema } from "../../src/schemas/records.js";
 import {
   PromptIntegrityError,
@@ -12,11 +12,17 @@ import {
   stablePrefix,
 } from "../../src/sessions/prompts.js";
 import { removeTree, tmpTree, writeTree } from "../helpers.js";
+import { SCHEMA_VERSION } from "../../src/schemas/common.js";
 
 /** T-047 — vendored role prompts, hash pinning, fail-closed resolution (S-7, D-9). */
 
-describe("T-047 the eight roles are a pinned wire format (S-1, S-7)", () => {
-  it("the role ids are exactly S-1's eight, in its order — renaming one is an F-3 schema event", () => {
+describe("T-047 the roles are a pinned wire format (S-1, S-7)", () => {
+  /**
+   * PRDR-281: `audit`, the first of S-1‴'s four, joins in the one F-3″ event, with its routing migrated.
+   * PRDR-282: `spec_write`, the second, joins the same event, which no release has shipped yet.
+   * PRDR-284: `spec_review`, the third, VALIDATE's reviewers, joins it too.
+   */
+  it("the role ids are exactly S-1's eight and S-1‴'s audit, spec_write, spec_review and plan_review, in order — adding or renaming one is an F-3 schema event", () => {
     expect(ROLE_IDS).toEqual([
       "planner",
       "diagnose",
@@ -26,26 +32,38 @@ describe("T-047 the eight roles are a pinned wire format (S-1, S-7)", () => {
       "review_fix",
       "research",
       "review",
+      "audit",
+      "spec_write",
+      "spec_review",
+      "plan_review",
     ]);
   });
 
-  it("the read-only set is S-1's four", () => {
-    expect([...READ_ONLY_ROLES].sort()).toEqual(["diagnose", "planner", "research", "review"]);
+  /**
+   * PRDR-284, PRDR-285: VALIDATE's reviewers read the pack and write their findings alone in it; a simulation writes only its scratch directory, outside the repository.
+   * PRDR-294: a plan's review reads, and writes its verdict alone.
+   */
+  it("the read-only set is S-1's four and S-1‴'s audit, spec_review and plan_review", () => {
+    expect([...READ_ONLY_ROLES].sort()).toEqual(["audit", "diagnose", "plan_review", "planner", "research", "review", "spec_review"]);
   });
 
-  it("every execution state that launches a session maps to a role; planner has none", () => {
+  it("every execution state that launches a session maps to a role; the init roles have none", () => {
     expect(Object.values(ROLE_FOR_STATE).sort()).toEqual(
       ["blind_fix", "diagnose", "implement", "informed_fix", "research", "review", "review_fix"].sort(),
     );
     expect(Object.values(ROLE_FOR_STATE)).not.toContain("planner");
+    expect(Object.values(ROLE_FOR_STATE)).not.toContain("audit");
+    expect(Object.values(ROLE_FOR_STATE)).not.toContain("plan_review");
   });
 });
 
 describe("T-047 packaging (S-7 AC)", () => {
-  it("the vendored set covers exactly the eight roles — a missing role fails at packaging, not runtime", () => {
-    for (const role of ROLE_IDS) {
-      expect(readFileSync(path.join(PROMPTS_DIR, `${role}.md`), "utf8").length).toBeGreaterThan(100);
+  /** C-4⁵ (PRDR-292): the planner role reads one prompt per job, and every other role reads its own, the plan's review among them since C-4⁸ (PRDR-294). */
+  it("the vendored set covers exactly the prompts — a missing one fails at packaging, not runtime", () => {
+    for (const id of PROMPT_IDS) {
+      expect(readFileSync(path.join(PROMPTS_DIR, `${id}.md`), "utf8").length).toBeGreaterThan(100);
     }
+    expect(PROMPT_IDS.filter((id) => !ROLE_IDS.includes(id as (typeof ROLE_IDS)[number]))).toEqual(["slice", "plan"]);
   });
 
   it("the checked-in manifest matches the prompt files byte-for-byte", () => {
@@ -61,9 +79,9 @@ describe("T-047 packaging (S-7 AC)", () => {
 
   it("loadPromptSet verifies every hash and returns the set", () => {
     const set = loadPromptSet();
-    for (const role of ROLE_IDS) {
-      expect(set.hashes[role]).toBe(promptHash(role));
-      expect(set.prompts[role].length).toBeGreaterThan(0);
+    for (const id of PROMPT_IDS) {
+      expect(set.hashes[id]).toBe(promptHash(id));
+      expect(set.prompts[id].length).toBeGreaterThan(0);
     }
   });
 
@@ -71,8 +89,8 @@ describe("T-047 packaging (S-7 AC)", () => {
     const dir = tmpTree();
     try {
       const manifest = readFileSync(MANIFEST_PATH, "utf8");
-      for (const role of ROLE_IDS) {
-        writeTree(dir, { [`${role}.md`]: readFileSync(path.join(PROMPTS_DIR, `${role}.md`), "utf8") });
+      for (const id of PROMPT_IDS) {
+        writeTree(dir, { [`${id}.md`]: readFileSync(path.join(PROMPTS_DIR, `${id}.md`), "utf8") });
       }
       writeTree(dir, { "manifest.json": manifest });
       expect(() => loadPromptSet(dir)).not.toThrow();
@@ -94,7 +112,7 @@ describe("T-047 assignment resolution fails closed (S-7 AC)", () => {
 
   it("a valid role@hash resolves", () => {
     const ref = `review@${set.hashes.review}`;
-    expect(assignmentsFileSchema.parse({ schema_version: 1, assignments: { "t-1": ref } })).toBeTruthy();
+    expect(assignmentsFileSchema.parse({ schema_version: SCHEMA_VERSION, assignments: { "t-1": ref } })).toBeTruthy();
     expect(resolveAssignment(ref, set)).toEqual({ role: "review", hash: set.hashes.review });
   });
 
@@ -109,25 +127,31 @@ describe("T-047 assignment resolution fails closed (S-7 AC)", () => {
 
   it("a malformed reference fails closed", () => {
     expect(() => resolveAssignment("review", set)).toThrow(PromptIntegrityError);
-    expect(() => assignmentsFileSchema.parse({ schema_version: 1, assignments: { t: "review@short" } })).toThrow();
+    expect(() => assignmentsFileSchema.parse({ schema_version: SCHEMA_VERSION, assignments: { t: "review@short" } })).toThrow();
   });
 });
 
 describe("T-047 prompt-lint checklist — each prompt encodes its protocol", () => {
   const set = loadPromptSet();
   const CHECKLIST: Record<string, readonly string[]> = {
-    planner: ["A-2", "acceptance criteria", "artifact_out", "P2"],
-    diagnose: ["repro", "predicted_failure", "A-3", "artifact_out", "falsified"],
-    implement: ["falsified", "surface", "never suppress", "commit with the ticket id"],
-    blind_fix: ["ONE attempt", "failure", "never suppress", "no second blind fix"],
-    informed_fix: ["research brief", "LAST", "what_would_falsify", "escalates to a human"],
-    review_fix: ["own budget", "never route to research", "scope findings", "commit with the ticket id"],
-    research: ["hierarchy", "local_search", "cache_key", "advice", "never authority", "upstream_bug"],
-    review: ["ONLY the diff", "scope", "style preferences are not findings", "approve"],
+    /* C-4⁵ (PRDR-292): the planner's two jobs and the plan's review, each in its own prompt, and none of them citing a PRD id; C-4⁸ (PRDR-294): the review grades by severity on four tags. */
+    slice: ["walking skeleton", "depends_on", "slice_size", "production_baseline", "milestone", "artifact_out"],
+    plan: ["acceptance_criteria", "criterion_ids", "word for word", "spec_defects", "by its id in `catalogue_ids`", "plan_index", "provides", "consumes", "non_goals", "artifact_out"],
+    plan_review: ["approve", "changes", "sizing", "shape", "dependency", "coherence", "blocker", "major", "minor", "`fix`", "artifact_out"],
+    /* PRDR-221/222/223: every role that receives the symbol server is told what symbol_tools are for, and that they are its whole surface; PRDR-224: the fix roles are told the two signal shapes. */
+    diagnose: ["repro", "predicted_failure", "A-3", "artifact_out", "falsified", "symbol_tools", "whole surface"],
+    /* PRDR-212: the surface is stated, a refusal is named as containment, and a signal can be taken back. */
+    /* PRDR-213: the third verb is stated to every write role. */
+    implement: ["falsified", "surface", "never suppress", "commit with the ticket id", "git add", "git rm", "refus", "retracted", "symbol_tools", "whole surface"],
+    blind_fix: ["ONE attempt", "failure", "never suppress", "no second blind fix", "git rm", "symbol_tools", "whole surface", "justification", "falsified_out"],
+    informed_fix: ["research brief", "LAST", "what_would_falsify", "escalates to a human", "git rm", "symbol_tools", "whole surface", "justification", "falsified_out"],
+    review_fix: ["own budget", "never route to research", "scope findings", "commit with the ticket id", "git rm", "symbol_tools", "whole surface", "justification", "falsified_out"],
+    research: ["hierarchy", "local_search", "cache_key", "advice", "never authority", "upstream_bug", "symbol_tools", "whole surface"],
+    review: ["ONLY the diff", "scope", "style preferences are not findings", "approve", "symbol_tools", "whole surface"],
   };
 
   it.each(Object.entries(CHECKLIST))("%s encodes its protocol markers", (role, markers) => {
-    const text = set.prompts[role as (typeof ROLE_IDS)[number]].toLowerCase();
+    const text = set.prompts[role as PromptId].toLowerCase();
     for (const marker of markers) {
       expect(text, `${role}.md must mention "${marker}"`).toContain(marker.toLowerCase());
     }

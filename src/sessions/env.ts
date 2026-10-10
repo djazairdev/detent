@@ -1,3 +1,5 @@
+import type { CacheLifetime } from "../schemas/cache-lifetime.js";
+
 /**
  * T-052 — the allowlisted session environment (SEC-4).
  *
@@ -8,12 +10,66 @@
  * stripped and leave S-6's purpose unmet with nothing to indicate why.
  */
 
-/** Baseline process needs. */
-const RUNTIME_VARS = ["PATH", "HOME", "SHELL", "TMPDIR", "TERM", "LANG", "LC_ALL", "USER"] as const;
+/**
+ * Baseline process needs. `LOGNAME` accompanies `USER`: the CLI's own auth
+ * probe reads both, and a supervisor script written for this project reported
+ * `loggedIn: false` until both were exported (PRDR-148).
+ */
+const RUNTIME_VARS = ["PATH", "HOME", "SHELL", "TMPDIR", "TERM", "LANG", "LC_ALL", "USER", "LOGNAME"] as const;
+
+/**
+ * PRDR-148: reaching the network at all. An operator behind a corporate proxy
+ * or a TLS-intercepting gateway needs these, and a session that cannot reach
+ * the API is not more secure than one that can — it is broken, and the
+ * operator chose that proxy. A proxy URL can embed credentials, so this is a
+ * real trade, made deliberately and written down rather than decided by
+ * omission.
+ */
+const NETWORK_VARS = [
+  "HTTPS_PROXY",
+  "HTTP_PROXY",
+  "NO_PROXY",
+  "https_proxy",
+  "http_proxy",
+  "no_proxy",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+] as const;
+
+/**
+ * PRDR-149: git identity. An implement session holds `Bash(git add:*)` and
+ * `Bash(git commit:*)`, and on a CI machine — the subscription-CI path
+ * PRDR-148 was written for — identity comes from these, not from
+ * `~/.gitconfig`. Without them every commit fails with "Please tell me who
+ * you are", so PRDR-148 fixed the transport and left the session unable to do
+ * the one thing it is allowed to do.
+ */
+const GIT_VARS = [
+  "GIT_AUTHOR_NAME",
+  "GIT_AUTHOR_EMAIL",
+  "GIT_COMMITTER_NAME",
+  "GIT_COMMITTER_EMAIL",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_SYSTEM",
+  "EMAIL",
+  /** An operator relocating the CLI's config takes its credentials with it. */
+  "CLAUDE_CONFIG_DIR",
+  "XDG_CONFIG_HOME",
+  "XDG_CACHE_HOME",
+] as const;
 
 /** The backend's own credentials and knobs Detent sanctions. */
 const BACKEND_VARS = [
   "ANTHROPIC_API_KEY",
+  /**
+   * PRDR-148: `hasLiveBackendAuth` names THREE transports and this list carried
+   * one. While `buildSessionEnv` had no caller the gap was inert — sessions
+   * inherited the token and worked. Wiring the allowlist (PRDR-133) turned a
+   * harmless staleness into an outage on the documented subscription-CI path.
+   * A control that has never run has never been checked.
+   */
+  "CLAUDE_CODE_OAUTH_TOKEN",
   "ANTHROPIC_BASE_URL",
   /*
    * S-6 (PRDR-054): the extended prompt-cache lifetime rides the documented
@@ -23,29 +79,41 @@ const BACKEND_VARS = [
   "ANTHROPIC_CUSTOM_HEADERS",
 ] as const;
 
-export const SESSION_ENV_ALLOWLIST: readonly string[] = [...RUNTIME_VARS, ...BACKEND_VARS];
+export const SESSION_ENV_ALLOWLIST: readonly string[] = [...RUNTIME_VARS, ...NETWORK_VARS, ...GIT_VARS, ...BACKEND_VARS];
 
-/** S-6: the value Detent sets on the TTL carrier when nothing else did. */
+/** S-6: the value Detent sets on a one-hour session's TTL carrier when nothing else did (S-6″: a five-minute session needs none). */
 export const EXTENDED_CACHE_HEADER = "anthropic-beta: extended-cache-ttl-2025-04-11";
+
+/** S-6″ (PRDR-320): the runtime's own switch for the main conversation's cache lifetime, `5m` or `1h`. */
+export const CACHE_TTL_VAR = "CLAUDE_CODE_PROMPT_CACHE_TTL";
 
 /**
  * Build a session's environment: allowlisted inheritance plus Detent's own
  * additions. Everything else — cloud credentials, tokens, deploy keys — never
  * crosses into a session.
+ *
+ * S-6″ (PRDR-320): the prompt cache's lifetime is set here, per session, as
+ * `CLAUDE_CODE_PROMPT_CACHE_TTL`, which the runtime reads before its own rule
+ * (one hour on a subscription, five minutes on an API key), so a kind of
+ * session gets the lifetime its measured gaps call for on either account. An
+ * operator's own value, and the runtime's other cache switches, are not on the
+ * allowlist and never reach a session: the per-kind table is a measured choice.
  */
 export function buildSessionEnv(
   parent: NodeJS.ProcessEnv = process.env,
   detentSet: Readonly<Record<string, string>> = {},
+  cacheTtl: CacheLifetime = "1h",
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const key of SESSION_ENV_ALLOWLIST) {
     const value = parent[key];
     if (value !== undefined) env[key] = value;
   }
-  /** S-6: request the extended cache lifetime unless the operator already did. */
-  if (env["ANTHROPIC_CUSTOM_HEADERS"] === undefined) {
+  /** S-6: a one-hour session requests the extended lifetime unless the operator already set headers; a five-minute one needs no header. */
+  if (cacheTtl === "1h" && env["ANTHROPIC_CUSTOM_HEADERS"] === undefined) {
     env["ANTHROPIC_CUSTOM_HEADERS"] = EXTENDED_CACHE_HEADER;
   }
+  env[CACHE_TTL_VAR] = cacheTtl;
   for (const [key, value] of Object.entries(detentSet)) env[key] = value;
   return env;
 }

@@ -39,8 +39,11 @@ export const ENGINES: readonly Engine[] = [
   rustEngine,
 ];
 
-/** Files whose presence is a stack fact (C-2). Scanned at the root only (D-5). */
-const MARKERS: readonly string[] = [
+/**
+ * Files whose presence is a stack fact (C-2), scanned in one directory: the
+ * root, or since V-5′ (PRDR-295) each package's own (`adapter/packages.ts`).
+ */
+export const MARKERS: readonly string[] = [
   "package.json",
   "package-lock.json",
   "pnpm-lock.yaml",
@@ -77,18 +80,46 @@ const PM_BY_LOCKFILE: readonly (readonly [string, PackageManager])[] = [
   ["bun.lockb", "bun"],
 ];
 
-export function gatherFacts(root: string): StackFacts {
+/**
+ * `inherited` is the package manager of the package holding this one (V-5′):
+ * a workspace member has no lockfile of its own, and its root's decides.
+ */
+export function gatherFacts(root: string, inherited: PackageManager | null = null): StackFacts {
   const present = new Set(existsSync(root) ? readdirSync(root) : []);
   const markers = MARKERS.filter((m) => present.has(m)).sort();
-  const pm = PM_BY_LOCKFILE.find(([file]) => present.has(file))?.[1] ?? null;
+  const pm = PM_BY_LOCKFILE.find(([file]) => present.has(file))?.[1] ?? inherited;
   return { root, markers, pm };
 }
 
-export function discover(root: string): Discovery {
-  const facts = gatherFacts(root);
+export function discover(root: string, inherited: PackageManager | null = null): Discovery {
+  const facts = gatherFacts(root, inherited);
   const candidates: Candidate[] = [];
   for (const engine of ENGINES) candidates.push(...engine.discover(facts));
   candidates.sort(compareCandidates);
+  /**
+   * PRDR-154: `preferOrchestrator` is deliberately NOT wired here, and this
+   * comment is the record of why rather than a silence.
+   *
+   * PRDR-141 wired it, and the audit of that commit found two ways it breaks a
+   * repository, both invisible to the suite:
+   *
+   * 1. It DEDUPS by command string and DROPS the collider. `go-work`'s root
+   *    gates are byte-identical to what `discover/go.ts` emits, so the
+   *    `adapter: "go"` candidate vanished from discovery — and `currentFor`
+   *    matches on slot+adapter+ref, so an existing `bindings.json` reported
+   *    `vanished`, which halts. Every ticket on a `go.work` repo bricked at
+   *    exit 2 against a binding that was valid the day before.
+   * 2. Its npm-workspaces root gate is `npm run test --workspaces --if-present`,
+   *    which exits 0 having run NOTHING when the packages carry no `test`
+   *    script and the root config covers them — the commonest monorepo layout.
+   *    `bindSlot` probes it, sees green, and binds a gate that can never fail.
+   *    That is the "greened on nothing" class V-1″ closed once already.
+   *
+   * The module needs its command table and its dedup reconsidered before it is
+   * connected — demote the collider rather than dropping it, and never prefer a
+   * sweep that can pass vacuously. That is a design change with its own
+   * evidence, not a wiring line.
+   */
   return {
     schema_version: SCHEMA_VERSION,
     stack: { markers: facts.markers, pm: facts.pm },

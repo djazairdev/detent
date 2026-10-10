@@ -2,10 +2,11 @@ import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { stateDir } from "../fs/layout.js";
 import { assignmentsFileSchema } from "../schemas/records.js";
-import type { RoleId } from "../schemas/roles.js";
+import { promptOf, type RoleId } from "../schemas/roles.js";
 import type { Ticket } from "../schemas/ticket.js";
 import { resolveAssignment, type PromptSet } from "../sessions/prompts.js";
 import type { PhaseOutcome } from "./machine.js";
+import { SCHEMA_VERSION } from "../schemas/common.js";
 
 /**
  * T-067 — PREPARE_AGENTS (S-7, D-9, SEC-2).
@@ -41,17 +42,20 @@ export function prepareAgents(deps: PrepareAgentsDeps): PhaseOutcome {
   const assignments: Record<string, string> = {};
   for (const ticket of deps.tickets) {
     const role = openingRole(ticket);
-    const hash = deps.prompts.hashes[role];
+    const hash = deps.prompts.hashes[promptOf(role, null)];
     const ref = `${role}@${hash}`;
     /**
-     * Fail closed BEFORE writing: resolveAssignment throws on an unknown role
-     * or a hash that does not match the vendored set (S-7's AC).
+     * S-7's AC asks this to fail closed before writing. It cannot: `ref` is
+     * built one line above from the same `deps.prompts` passed as the second
+     * argument, with `role` drawn from `ROLE_IDS`, so `resolveAssignment` has
+     * no input here it can reject. The call is a tautology, and the assurance
+     * this block claimed is not one the site can give.
      */
     resolveAssignment(ref, deps.prompts);
     assignments[ticket.id] = ref;
   }
 
-  const file = assignmentsFileSchema.parse({ schema_version: 1, assignments });
+  const file = assignmentsFileSchema.parse({ schema_version: SCHEMA_VERSION, assignments });
   writeFileSync(assignmentsPath(deps.root), `${JSON.stringify(file, null, 2)}\n`);
   deps.note?.(`assigned ${Object.keys(assignments).length} ticket(s) from the vendored role set (S-7)`);
 

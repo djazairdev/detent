@@ -23,7 +23,9 @@ type BudgetScope =
  * The breach target a ceiling declares. Most emit BUDGET_BREACH, but three do
  * not, and encoding that here keeps T-012's coverage test honest (PRDR-043).
  * `NONE` is X-1″'s advisory figure: a number the planner sizes against and
- * nothing enforces, so it has no breach to target.
+ * nothing enforces, so it has no breach to target. `UNVERIFIED_FIXES` is
+ * VALIDATE's (C-2¹⁴): the loop ends with fixes no round verified, which go to
+ * the operator as risks, or as AWAIT_INFO for a blocker.
  */
 export type BreachTarget =
   | "BUDGET_BREACH"
@@ -32,7 +34,8 @@ export type BreachTarget =
   | "AWAIT_INFO_BATCH"
   | "LADDER_ENTRY"
   | "RED_GATE_NO_EXIT"
-  | "REJECTED_CANDIDATE";
+  | "REJECTED_CANDIDATE"
+  | "UNVERIFIED_FIXES";
 
 export interface CeilingSpec {
   readonly scope: BudgetScope;
@@ -55,11 +58,18 @@ export const CEILINGS = {
   research_sessions: { scope: "ticket/generation", breachTarget: "BUDGET_BREACH", default: 1 },
   hypotheses: { scope: "ticket/generation", breachTarget: "BUDGET_BREACH", default: 2 },
   /**
-   * Net session ceiling per generation: strictly above the computed worst case
-   * (T-014). Moved with X-1‴ (three review-fix rounds) and A-5′ (one review
-   * relaunch per IN_REVIEW entry), PRDR-108/109 — computed 24, net 28.
+   * Net session ceiling per generation: a COUNT since PRDR-265.
+   *
+   * It was "strictly above the computed worst case (T-014)", enforced twice —
+   * refused at `loadConfig` and thrown at the launch seam. Neither ordered
+   * anything: the ladder decides what happens next, and `maxPossibleSessions`'s
+   * walk over the transition table is the actual termination proof. That walk
+   * is KEPT and still refuses a transition table with a cycle in it; what goes
+   * is the arithmetic comparing a configured number against it.
+   * Moved with X-1‴ (three review-fix rounds) and A-5′ (one review relaunch per
+   * IN_REVIEW entry), PRDR-108/109 — computed 24, net 28.
    */
-  sessions: { scope: "ticket/generation", breachTarget: "BUDGET_BREACH", default: 28 },
+  sessions: { scope: "ticket/generation", breachTarget: "NONE", default: 28 },
   ticket_wall_clock_ms: { scope: "ticket/generation", breachTarget: "BUDGET_BREACH", default: 3_600_000 },
   /**
    * X-1″ (PRDR-106): a sizing target, not a ceiling. It reaches PLAN and
@@ -72,12 +82,51 @@ export const CEILINGS = {
    * because that is still the size of one honest implement session.
    */
   turns_per_stage: { scope: "plan-sizing", breachTarget: "NONE", default: 80 },
-  failure_research_tool_calls: { scope: "research-session", breachTarget: "RESEARCH_DRY", default: 8 },
-  planning_research_tool_calls: { scope: "init", breachTarget: "AWAIT_INFO_BATCH", default: 16 },
+  failure_research_tool_calls: { scope: "research-session", breachTarget: "NONE", default: 8 },
+  planning_research_tool_calls: { scope: "init", breachTarget: "NONE", default: 16 },
+  /**
+   * C-2⁶, C-2¹⁴ (PRDR-284): the review rounds one validation may run, a
+   * ceiling and never a retry (specification decision 13). Reaching it leaves
+   * the last round's fixes applied and never verified: its majors go to
+   * PRESENT as risks, and a blocker stops `init` at VALIDATE with AWAIT_INFO.
+   * ksarjs converged in its seventh round, so 8 sits above it.
+   */
+  spec_validation_rounds: { scope: "init", breachTarget: "UNVERIFIED_FIXES", default: 8 },
+  /**
+   * X-1⁸ (PRDR-324): how many of AUDIT's claim checks, and of a VALIDATE
+   * round's reviews, run at once. Not a ceiling on spend, and nothing breaches
+   * it: more finishes sooner and spends an account's usage window faster, and
+   * a limit reached loses no finished work (X-8″). Four is what every
+   * measurement so far ran at.
+   */
+  init_sessions_at_once: { scope: "init", breachTarget: "NONE", default: 4 },
   flake_reruns: { scope: "red-gate", breachTarget: "LADDER_ENTRY", default: 1 },
   gate_timeout_ms: { scope: "gate-execution", breachTarget: "RED_GATE_NO_EXIT", default: 900_000 },
   binding_probe_timeout_ms: { scope: "binding-probe", breachTarget: "REJECTED_CANDIDATE", default: 120_000 },
-  run_spend_usd: { scope: "run", breachTarget: "BUDGET_BREACH", default: 100 },
+  /**
+   * X-1⁵ (PRDR-191): ADVISORY. Counted and reported; it no longer halts a run.
+   * A total fires on success and fires late on failure, and no constant is both
+   * low enough to leave real work alone and high enough to catch a defect fast.
+   */
+  run_spend_usd: { scope: "run", breachTarget: "NONE", default: 100 },
+  /**
+   * X-1⁵ (PRDR-191): the quantity that actually describes a runaway — money out
+   * with nothing completed. A MINIMUM, not a fallback: a resumed run reuses
+   * finished slices for $0 (C-8), so a purely derived threshold would collapse
+   * toward zero and halt on the first dollar of real work.
+   */
+  spend_without_progress_floor_usd: { scope: "run", breachTarget: "NONE", default: 5 },
+  /**
+   * X-1⁵: how many sessions' worth of OBSERVED spend may pass with nothing
+   * completing. The scale-free term, and the one that carries the threshold
+   * before any unit has completed. A fixed dollar floor was the first attempt
+   * and its own audit found it wrong for the same reason X-1⁵ rejects a fixed
+   * total: it read ~3x this project's slice cost and would have read 0.3x on a
+   * project whose sessions cost ten times as much.
+   */
+  spend_without_progress_sessions: { scope: "run", breachTarget: "NONE", default: 20 },
+  /** X-1⁵: multiplied by the observed cost of the units this run has completed. */
+  spend_without_progress_multiple: { scope: "run", breachTarget: "NONE", default: 3 },
 } as const satisfies Record<string, CeilingSpec>;
 
 export type CeilingKey = keyof typeof CEILINGS;
@@ -108,6 +157,9 @@ const structural = (key: (typeof LADDER_CEILING_KEYS)[number]) =>
  */
 const withDefault = (key: CeilingKey) => z.number().positive().default(CEILINGS[key].default);
 
+/** X-1⁸ (PRDR-324): what a config outside the range is told. */
+const SESSIONS_AT_ONCE_RANGE = "X-1⁸: init_sessions_at_once is how many sessions init runs at once, a whole number from 1 to 16";
+
 export const budgetsSchema = z
   .strictObject({
     blind_fix_attempts: structural("blind_fix_attempts"),
@@ -120,10 +172,21 @@ export const budgetsSchema = z
     turns_per_stage: withDefault("turns_per_stage"),
     failure_research_tool_calls: withDefault("failure_research_tool_calls"),
     planning_research_tool_calls: withDefault("planning_research_tool_calls"),
+    /* A count of rounds: a fraction of one runs nothing. */
+    spec_validation_rounds: z.number().int().positive().default(CEILINGS.spec_validation_rounds.default),
+    init_sessions_at_once: z
+      .number({ error: SESSIONS_AT_ONCE_RANGE })
+      .int({ error: SESSIONS_AT_ONCE_RANGE })
+      .min(1, { error: SESSIONS_AT_ONCE_RANGE })
+      .max(16, { error: SESSIONS_AT_ONCE_RANGE })
+      .default(CEILINGS.init_sessions_at_once.default),
     flake_reruns: withDefault("flake_reruns"),
     gate_timeout_ms: withDefault("gate_timeout_ms"),
     binding_probe_timeout_ms: withDefault("binding_probe_timeout_ms"),
     run_spend_usd: withDefault("run_spend_usd"),
+    spend_without_progress_floor_usd: withDefault("spend_without_progress_floor_usd"),
+    spend_without_progress_sessions: withDefault("spend_without_progress_sessions"),
+    spend_without_progress_multiple: withDefault("spend_without_progress_multiple"),
   })
   .describe("X-1 ceilings");
 

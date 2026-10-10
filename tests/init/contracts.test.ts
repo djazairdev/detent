@@ -1,0 +1,423 @@
+import { describe, expect, it } from "vitest";
+import { applyContracts, resolveOwner } from "../../src/init/contracts.js";
+import { BOOTSTRAP_TICKET_ID } from "../../src/init/plan-write.js";
+import { stackEntrySchema } from "../../src/schemas/decide.js";
+import { CONTRACT_KINDS, contractKey, planDraftSchema, type SliceSpec } from "../../src/schemas/init.js";
+import type { DraftedTicket } from "../../src/init/plan-write.js";
+import { SCHEMA_VERSION } from "../../src/schemas/common.js";
+import { CLEAN_AUDIT, planning } from "./plan-fixture.js";
+
+/**
+ * A-1‴ (PRDR-120) — the contract checks, against the defects that produced them.
+ *
+ * Every case here is modelled on a finding a fresh reviewer produced by hand on
+ * ksar-cloud's walking-skeleton slice, and each cost a revision round to
+ * surface. The point of the suite is that none of them needs a model any more:
+ * the same conclusion falls out of the declarations, in code, for free.
+ */
+
+const bare = (id: string) => ({
+  id,
+  type: "feature" as const,
+  title: `t ${id}`,
+  description: "",
+  acceptance_criteria: ["it works"],
+  non_goals: [],
+  surface: ["src/**"],
+  depends_on: [],
+  provides: [],
+  consumes: [],
+  risk_label: false,
+});
+
+const t = (id: string, over: Partial<DraftedTicket> = {}): DraftedTicket => ({
+  id,
+  type: "feature",
+  title: `t ${id}`,
+  description: "",
+  acceptance_criteria: ["it works"],
+  non_goals: [],
+  surface: ["src/**"],
+  depends_on: [],
+  provides: [],
+  consumes: [],
+  requirement_ids: [],
+  baseline_ids: [],
+  criterion_ids: [],
+  risk_label: false,
+  slice: "s01",
+  ...over,
+});
+
+/** A written plan whose blockers contain a cycle is a pool that never offers those tickets. */
+function noCycle(tickets: readonly DraftedTicket[]): boolean {
+  const edges = new Map(tickets.map((x) => [x.id, x.depends_on]));
+  const done = new Set<string>();
+  let ok = true;
+  const walk = (id: string, stack: Set<string>): void => {
+    if (stack.has(id)) { ok = false; return; }
+    if (done.has(id)) return;
+    stack.add(id);
+    for (const d of edges.get(id) ?? []) walk(d, stack);
+    stack.delete(id);
+    done.add(id);
+  };
+  for (const id of edges.keys()) walk(id, new Set());
+  return ok;
+}
+
+describe("A-1‴ the four checks, each against a real ksar defect", () => {
+  it("duplicate ownership: `t-004` and `t-005` both defining run() is caught without a reviewer", () => {
+    const out = applyContracts([
+      t("t-s01-004", { provides: [{ kind: "symbol", id: "controlplane/cmd.run", note: "starts the server on :0" }] }),
+      t("t-s01-005", { provides: [{ kind: "symbol", id: "controlplane/cmd.run", note: "starts the server after migrations" }] }),
+    ]);
+    expect(out.findings).toHaveLength(1);
+    expect(out.findings[0]!.tag).toBe("coherence");
+    expect(out.findings[0]!.finding).toContain("t-s01-004 and t-s01-005 both provide");
+    expect(out.findings[0]!.finding).toContain("controlplane/cmd.run");
+  });
+
+  it("ordering: a config key needed by one ticket and added by another DERIVES the missing edge", () => {
+    const out = applyContracts([
+      t("t-s01-018", { consumes: [{ kind: "config", id: "KSAR_BUILD_TIMEOUT" }] }),
+      t("t-s01-027", { provides: [{ kind: "config", id: "KSAR_BUILD_TIMEOUT", note: "build deadline, default 30m" }] }),
+    ]);
+    /** The plan gains an edge the planner never wrote — X-4′ would have found this a generation later. */
+    expect(out.tickets.find((x) => x.id === "t-s01-018")!.depends_on).toEqual(["t-s01-027"]);
+    expect(out.derived).toEqual([{ consumer: "t-s01-018", provider: "t-s01-027", contract: "config:KSAR_BUILD_TIMEOUT" }]);
+    expect(out.findings).toEqual([]);
+  });
+
+  it("an edge the planner already declared is left alone, directly or transitively", () => {
+    const out = applyContracts([
+      t("a", { provides: [{ kind: "symbol", id: "pkg.Deps", note: "composition root" }] }),
+      t("b", { depends_on: ["a"] }),
+      t("c", { depends_on: ["b"], consumes: [{ kind: "symbol", id: "pkg.Deps" }] }),
+    ]);
+    /** `c` reaches `a` through `b`; nothing to add. */
+    expect(out.derived).toEqual([]);
+    expect(out.tickets.find((x) => x.id === "c")!.depends_on).toEqual(["b"]);
+  });
+
+  it("unowned consumption: the port nobody assigns is a finding, not a silent gap", () => {
+    const out = applyContracts([t("t-s01-029", { consumes: [{ kind: "config", id: "KSAR_PORT_RANGE" }] })]);
+    expect(out.findings).toHaveLength(1);
+    expect(out.findings[0]!.tag).toBe("dependency");
+    expect(out.findings[0]!.finding).toContain("no ticket in the plan provides it");
+    expect(out.findings[0]!.finding).toContain("KSAR_PORT_RANGE");
+  });
+
+  it("contended file: four tickets editing controlplane/go.mod is named as the conflict it is", () => {
+    const out = applyContracts([
+      t("t-s01-024", { provides: [{ kind: "file", id: "controlplane/go.mod", note: "adds traefik dynamic config" }] }),
+      t("t-s01-002", { provides: [{ kind: "file", id: "controlplane/go.mod", note: "adds pgx" }] }),
+    ]);
+    expect(out.findings[0]!.tag).toBe("coherence");
+    expect(out.findings[0]!.finding).toContain("a file two tickets both create is a conflict");
+  });
+
+  it("a mutual need is a contradiction, and the edge is refused rather than closing a cycle", () => {
+    const out = applyContracts([
+      t("a", { provides: [{ kind: "symbol", id: "pkg.A", note: "" }], consumes: [{ kind: "symbol", id: "pkg.B" }] }),
+      t("b", { depends_on: ["a"], provides: [{ kind: "symbol", id: "pkg.B", note: "" }] }),
+    ]);
+    /** `a` needs `b`, but `b` already depends on `a` — adding the edge would deadlock the pool. */
+    expect(out.tickets.find((x) => x.id === "a")!.depends_on).toEqual([]);
+    expect(out.findings[0]!.tag).toBe("dependency");
+    expect(out.findings[0]!.finding).toContain("one of them owns the wrong half");
+  });
+
+  it("two tickets that each consume the other's name cannot BOTH derive an edge — that was a silent deadlock", () => {
+    const out = applyContracts([
+      t("a", { provides: [{ kind: "symbol", id: "pkg.A", note: "" }], consumes: [{ kind: "symbol", id: "pkg.B" }] }),
+      t("b", { provides: [{ kind: "symbol", id: "pkg.B", note: "" }], consumes: [{ kind: "symbol", id: "pkg.A" }] }),
+    ]);
+    /**
+     * Judging each candidate against a reachability snapshot taken BEFORE any
+     * derivation let both edges through: in the original graph neither reached
+     * the other. The plan was written with a blocked on b and b blocked on a,
+     * no finding, and `ready()` never offered either again.
+     */
+    expect(out.derived.map((d) => `${d.consumer}->${d.provider}`)).toEqual(["a->b"]);
+    expect(out.tickets.find((x) => x.id === "b")!.depends_on).toEqual([]);
+    expect(out.findings.map((f) => f.tag)).toEqual(["dependency"]);
+    expect(out.findings[0]!.finding).toContain("one of them owns the wrong half");
+  });
+
+  it("a ring of three closes the same way — no pairwise check could have seen it", () => {
+    const ring = applyContracts([
+      t("x", { provides: [{ kind: "symbol", id: "p.X", note: "" }], consumes: [{ kind: "symbol", id: "p.Y" }] }),
+      t("y", { provides: [{ kind: "symbol", id: "p.Y", note: "" }], consumes: [{ kind: "symbol", id: "p.Z" }] }),
+      t("z", { provides: [{ kind: "symbol", id: "p.Z", note: "" }], consumes: [{ kind: "symbol", id: "p.X" }] }),
+    ]);
+    expect(ring.derived.map((d) => `${d.consumer}->${d.provider}`)).toEqual(["x->y", "y->z"]);
+    expect(noCycle(ring.tickets)).toBe(true);
+    expect(ring.findings.some((f) => f.finding.includes("owns the wrong half"))).toBe(true);
+  });
+
+  it("a long legitimate chain still derives every edge — the guard refuses cycles, not depth", () => {
+    const chain = applyContracts(
+      Array.from({ length: 6 }, (_, i) =>
+        t(`t${i}`, {
+          provides: [{ kind: "symbol", id: `p.S${i}`, note: "" }],
+          ...(i === 0 ? {} : { consumes: [{ kind: "symbol" as const, id: `p.S${i - 1}` }] }),
+        }),
+      ),
+    );
+    expect(chain.derived).toHaveLength(5);
+    expect(chain.findings).toEqual([]);
+    expect(noCycle(chain.tickets)).toBe(true);
+    /** And the ordering is real: the last ticket transitively reaches the first. */
+    expect(chain.tickets.find((x) => x.id === "t5")!.depends_on).toEqual(["t4"]);
+  });
+
+  it("a ticket consuming what it provides itself is not a dependency on anyone", () => {
+    const out = applyContracts([
+      t("a", { provides: [{ kind: "symbol", id: "pkg.X", note: "" }], consumes: [{ kind: "symbol", id: "pkg.X" }] }),
+    ]);
+    expect(out.findings).toEqual([]);
+    expect(out.derived).toEqual([]);
+  });
+
+  it("is pure: it never mutates its input, and a plan with no declarations is unchanged", () => {
+    const before = [t("a"), t("b", { depends_on: ["a"] })];
+    const snapshot = JSON.stringify(before);
+    const out = applyContracts(before);
+    expect(JSON.stringify(before)).toBe(snapshot);
+    expect(out.findings).toEqual([]);
+    expect(out.tickets.map((x) => x.depends_on)).toEqual([[], ["a"]]);
+  });
+
+  it("end to end: the derived edge reaches the written plan and the presentation says Detent added it", async () => {
+    const { repo, PROMPTS, BUDGETS, APPROVE_PLAN, planningPipeline } = await import("./plan-fixture.js");
+    const { runInit } = await import("../../src/init/machine.js");
+    const { MockBackend, okResult } = await import("../../src/sessions/mock.js");
+    const { readTicket } = await import("../../src/kernel/tickets/readers.js");
+    const { writeFileSync } = await import("node:fs");
+
+    const root = repo({ "PRD.md": "# spec\n", "package.json": JSON.stringify({ scripts: { test: "sh t.sh" } }), "package-lock.json": "{}\n", "t.sh": "exit 0\n" });
+    const draft = {
+      schema_version: SCHEMA_VERSION,
+      tickets: [
+        /** The consumer is drafted FIRST and declares no edge — exactly the ksar shape. */
+        { ...bare("t-s01-001"), consumes: [{ kind: "config", id: "KSAR_BUILD_TIMEOUT" }] },
+        { ...bare("t-s01-002"), provides: [{ kind: "config", id: "KSAR_BUILD_TIMEOUT", note: "build deadline, default 30m" }] },
+      ],
+    };
+    const backend = new MockBackend({ audit: CLEAN_AUDIT, 
+      ...planning((spec) => {
+        const artifact = spec.artifactOut.endsWith("plan-draft.json")
+          ? draft
+          : spec.artifactOut.endsWith("plan-review.json")
+            ? APPROVE_PLAN
+            : spec.artifactOut.endsWith("slices.json")
+              ? { schema_version: SCHEMA_VERSION, slices: [{ id: "s01", title: "the product", goal: "g", requirement_ids: [], baseline_items: [], docs: [], depends_on: [], rationale: "" }] }
+              : null;
+        if (artifact === null) throw new Error(`the planner was asked for ${spec.artifactOut}, which no planning stage writes`);
+        writeFileSync(spec.artifactOut, `${JSON.stringify(artifact)}\n`);
+        return okResult();
+      }),
+    });
+    const result = await runInit(root, planningPipeline({ root, backend, prompts: PROMPTS, budgets: BUDGETS }));
+
+    /** The planner never wrote this edge; the coupling did. */
+    expect(readTicket(root, "t-s01-001").blockers).toEqual(["t-s01-002"]);
+    expect(result.interrupt?.message).toContain("Dependencies Detent derived (1)");
+    expect(result.interrupt?.message).toContain("t-s01-001 → t-s01-002   (config:KSAR_BUILD_TIMEOUT)");
+    /** And the interface travels to the work: the consumer is handed the owner's own note. */
+    const { publicTicket } = await import("../../src/kernel/referee-context.js");
+    const seen = publicTicket(readTicket(root, "t-s01-001"), root);
+    expect(seen["consumes"]).toEqual([
+      { kind: "config", id: "KSAR_BUILD_TIMEOUT", owned_by: "t-s01-002", note: "build deadline, default 30m" },
+    ]);
+  });
+
+  it("a name provided by a LATER slice is refused, not derived — deriving it deadlocked both slices", () => {
+    const out = applyContracts(
+      [
+        t("t-s01-001", { slice: "s01", consumes: [{ kind: "config", id: "SHARED_KEY" }] }),
+        t("t-s02-001", { slice: "s02", provides: [{ kind: "config", id: "SHARED_KEY", note: "the key" }] }),
+      ],
+      ["s01", "s02"],
+    );
+    /**
+     * The ordinary shape: an early ticket needs a key a later slice defines.
+     * Deriving the backwards edge blocked s01 on s02, while capstoneBlockers
+     * blocked s02 on s01 for slice order. Both READY, neither ever claimable,
+     * and nothing said so.
+     */
+    expect(out.derived).toEqual([]);
+    expect(out.tickets.find((x) => x.id === "t-s01-001")!.depends_on).toEqual([]);
+    expect(out.findings[0]!.finding).toContain("LATER slice");
+    expect(out.findings[0]!.finding).toContain("would deadlock");
+  });
+
+  it("slice order is derived from the tickets when the caller does not pass it — the default is not fail-open", () => {
+    const out = applyContracts([
+      t("t-s01-001", { slice: "s01", consumes: [{ kind: "config", id: "K" }] }),
+      t("t-s02-001", { slice: "s02", provides: [{ kind: "config", id: "K", note: "" }] }),
+    ]);
+    expect(out.derived).toEqual([]);
+    expect(out.findings[0]!.finding).toContain("LATER slice");
+  });
+
+  it("a name owned by DONE work this plan no longer redrafts is not reported unowned", () => {
+    const consumer = [t("t-s02-001", { slice: "s02", consumes: [{ kind: "config", id: "SHARED_KEY" }] })];
+    expect(applyContracts(consumer).findings).toHaveLength(1);
+    /** The DONE ticket still owns it; the false alarm would have invited a second provider. */
+    expect(applyContracts(consumer, [], ["config:SHARED_KEY"]).findings).toEqual([]);
+  });
+
+  it("both halves of the system bind a contested name to the SAME provider", () => {
+    expect(resolveOwner(["t-b", "t-a", "t-c"], "t-self")).toBe("t-a");
+    /** Order of declaration must not change the answer — the edge and the note agree. */
+    expect(resolveOwner(["t-c", "t-a", "t-b"], "t-self")).toBe("t-a");
+    expect(resolveOwner(["t-a"], "t-a")).toBeUndefined();
+  });
+
+  it("a stray space does not turn one name into two", () => {
+    const parsed = planDraftSchema.parse({
+      schema_version: SCHEMA_VERSION,
+      tickets: [
+        { ...bare("t-s01-001"), provides: [{ kind: "config", id: " SHARED_PORT ", note: "n" }] },
+        { ...bare("t-s01-002"), consumes: [{ kind: "config", id: "SHARED_PORT " }] },
+      ],
+    });
+    const out = applyContracts(parsed.tickets.map((x) => ({ ...x, slice: "s01" })));
+    expect(out.findings).toEqual([]);
+    expect(out.derived.map((d) => d.contract)).toEqual(["config:SHARED_PORT"]);
+  });
+
+  it("the vocabulary is closed and the key is stable", () => {
+    /* C-4⁵ (PRDR-292): the kinds a pack catalogues, named by their catalogue ids, joined the six. */
+    expect([...CONTRACT_KINDS]).toEqual(["symbol", "config", "file", "route", "table", "event", "error_code", "setting", "job"]);
+    expect(contractKey({ kind: "symbol", id: "pkg.Name" })).toBe("symbol:pkg.Name");
+    /** Two kinds sharing an id are two different names. */
+    expect(contractKey({ kind: "config", id: "X" })).not.toBe(contractKey({ kind: "file", id: "X" }));
+  });
+});
+
+/**
+ * A-1⁵ (PRDR-201) — coverage, decided rather than read.
+ *
+ * C-2⁗ has commanded since PRDR-117 that every id in a slice's
+ * `requirement_ids` and every item in its `baseline_items` reaches a ticket.
+ * Nothing checked it, and nothing could: the assignment lived on the slice and
+ * the answer lived in prose. These cases are the answer becoming data.
+ */
+describe("A-1⁵ coverage is a set operation over what the ticket declares", () => {
+  const slice = (over: Partial<SliceSpec> = {}): SliceSpec =>
+    ({
+      id: "s01",
+      title: "skeleton",
+      goal: "g",
+      requirement_ids: [],
+      baseline_items: [],
+      docs: [],
+      depends_on: [],
+      rationale: "",
+      ...over,
+    }) as SliceSpec;
+
+  it("a baseline item no ticket sources is a finding, with no session launched", () => {
+    const out = applyContracts(
+      [t("t-s01-001", { baseline_ids: ["PB-004"] })],
+      ["s01"],
+      [],
+      [slice({ baseline_items: ["PB-004", "PB-008"] })],
+    );
+    expect(out.findings.map((f) => f.finding).join("\n")).toContain("PB-008");
+    expect(out.findings.map((f) => f.finding).join("\n")).not.toContain("PB-004");
+    expect(out.findings.every((f) => f.tag === "coverage")).toBe(true);
+  });
+
+  it("a requirement id no ticket serves is a finding", () => {
+    const out = applyContracts(
+      [t("t-s01-001", { requirement_ids: ["R-1"] })],
+      ["s01"],
+      [],
+      [slice({ requirement_ids: ["R-1", "R-7"] })],
+    );
+    expect(out.findings.map((f) => f.finding).join("\n")).toContain("R-7");
+    expect(out.findings.map((f) => f.finding).join("\n")).not.toContain("R-1");
+  });
+
+  it("everything assigned and everything declared is silent", () => {
+    const out = applyContracts(
+      [t("t-s01-001", { requirement_ids: ["R-1"], baseline_ids: ["PB-004"] })],
+      ["s01"],
+      [],
+      [slice({ requirement_ids: ["R-1"], baseline_items: ["PB-004"] })],
+    );
+    expect(out.findings).toEqual([]);
+  });
+
+  /**
+   * PRDR-293: this was the C-8 case, "undeclared, not uncovered", which spared
+   * a slice cached before the fields existed a false accusation. A failure now
+   * goes to a redraft, which is what that report asked the operator for, and a
+   * slice cached before PLAN's prompt changed misses its key; so a slice whose
+   * tickets declare nothing fails for each item, which a redraft can act on.
+   */
+  it("a slice whose tickets declare nothing fails for each item it was assigned", () => {
+    const out = applyContracts(
+      [t("t-s01-001"), t("t-s01-002")],
+      ["s01"],
+      [],
+      [slice({ requirement_ids: ["R-1", "R-7"], baseline_items: ["PB-004"] })],
+    );
+    expect(out.findings.map((f) => f.key)).toEqual(["coverage:s01:PB-004", "coverage:s01:R-1", "coverage:s01:R-7"]);
+  });
+
+  it("a slice with no tickets yet is not judged at all", () => {
+    /* `t()` defaults to slice s01, so the ticket has to SAY it belongs elsewhere. */
+    const out = applyContracts([t("t-s02-001", { slice: "s02" })], ["s01", "s02"], [], [slice({ baseline_items: ["PB-004"] })]);
+    expect(out.findings).toEqual([]);
+  });
+
+  it("prose is not coverage: an id named only in a non-goal does not source it", () => {
+    const out = applyContracts(
+      /* It declares PB-004, so the slice is NOT undeclared — PB-009 exists only in prose. */
+      [t("t-s01-001", { baseline_ids: ["PB-004"], non_goals: ["Localisation and JSON diagnostics (PB-009, slice s06)."] })],
+      ["s01"],
+      [],
+      [slice({ baseline_items: ["PB-004", "PB-009"] })],
+    );
+    expect(out.findings.map((f) => f.finding).join("\n")).toContain("PB-009");
+  });
+});
+
+/**
+ * A-1⁶ (PRDR-206) — the bootstrap creates the ground and, until now, declared
+ * none of it. Two of gate-313's four "proved by code" contract findings were
+ * tickets consuming `file:package.json`, which the bootstrap creates and the
+ * checker could not know about — a false proof, handed to the whole-plan
+ * review as `already_found`.
+ */
+describe("A-1⁶ a scaffold file the bootstrap creates is provided, not unowned", () => {
+  const consumer = t("t-s01-001", { consumes: [{ kind: "file", id: "package.json" }] });
+  const scaffold = { owner: BOOTSTRAP_TICKET_ID, files: ["package.json", "tsconfig.json"] };
+
+  it("is not reported and derives no edge — every ticket already blocks on the bootstrap (C-4)", () => {
+    /* Before PRDR-206: `consumes the file package.json, which no ticket creates`. */
+    const withScaffold = applyContracts([consumer], ["s01"], [], [], scaffold);
+    expect(withScaffold.findings).toEqual([]);
+    expect(withScaffold.derived).toEqual([]);
+    const without = applyContracts([consumer], ["s01"], [], []);
+    expect(without.findings.map((f) => f.tag)).toEqual(["dependency"]);
+    expect(without.findings[0]?.finding).toContain("no ticket creates");
+  });
+
+  it("a file the scaffold does not create is still reported — nothing is inferred from a name", () => {
+    const other = t("t-s01-002", { consumes: [{ kind: "file", id: "src/never-made.ts" }] });
+    const result = applyContracts([other], ["s01"], [], [], scaffold);
+    expect(result.findings.map((f) => f.tag)).toEqual(["dependency"]);
+    expect(result.findings[0]?.finding).toContain("src/never-made.ts");
+  });
+
+  it("a stack entry DECIDE's session writes without scaffold files gives the bootstrap none (D-10′, PRDR-290)", () => {
+    const parsed = stackEntrySchema.parse({ language: "TypeScript", toolchain: "Node.js 22" });
+    expect(parsed.scaffold_files).toEqual([]);
+  });
+});

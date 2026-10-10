@@ -1,8 +1,8 @@
-import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
+import { hostname } from "node:os";
 import path from "node:path";
-import { HOOK_STAGE_FILE, HOOK_SURFACE_FILE } from "../fs/hook-files.js";
-import { guardToolUse, pathOf, stopGate } from "../sessions/guard.js";
+import { HOOK_STAGE_FILE, HOOK_SURFACE_FILE, SPAWN_TOOLS, claimBreakable, pidAlive } from "../fs/hook-files.js";
+import { guardToolUse, pathOf } from "../sessions/guard.js";
 
 /**
  * T-113 — the D-21 containment hook in plugin form (S-2′, SEC-6, D-29).
@@ -10,7 +10,7 @@ import { guardToolUse, pathOf, stopGate } from "../sessions/guard.js";
  * The oracle enforced containment via subprocess hooks reading
  * `active_surface.json`; the headless driver registers the same decisions as
  * in-process SDK callbacks (sdk.ts). This module is the third skin over the
- * ONE decision implementation — `guardToolUse`/`stopGate` from
+ * ONE decision implementation — `guardToolUse` from
  * sessions/guard.ts — shipped as the plugin's `hooks/hooks.json` command
  * (bundled by scripts/build-plugin.ts into `hooks/dist/detent-hook.cjs`).
  * Deterministic `command` hooks only: the platform's `prompt`/`agent` hook
@@ -46,15 +46,8 @@ interface HookPayload {
   readonly tool_input?: unknown;
   readonly cwd?: unknown;
   readonly stop_hook_active?: unknown;
+  readonly session_id?: unknown;
 }
-
-/**
- * The oracle's 900 s stop-gate timeout — equal to `gate_timeout_ms`'s X-1
- * default. A literal, not an import: the bundle stays free of the zod-backed
- * schema layer, and the hook is config-blind by design — the referee re-runs
- * the authoritative gate with the configured ceiling regardless (P2).
- */
-const GATE_TIMEOUT_MS = 900_000;
 
 function payloadCwd(payload: HookPayload): string {
   return typeof payload.cwd === "string" && payload.cwd !== "" ? payload.cwd : process.cwd();
@@ -75,8 +68,33 @@ function denyJson(reason: string): string {
 }
 
 /** An `expires_at_ms` in the past makes a policy file ABSENT, not broken (crash hygiene). */
+/**
+ * PRDR-149: an ABSENT expiry is expired, on BOTH policy files. The Stop path
+ * got this rule and the PreToolUse path, one function away, did not — so a
+ * repository could commit an `active_surface.json` with no expiry and deny
+ * every path-bearing tool call, forever, in every session of every user who
+ * installed the plugin. Every legitimate writer stamps the field.
+ */
 function expired(doc: { expires_at_ms?: unknown } | null, nowMs: number): boolean {
-  return typeof doc?.expires_at_ms === "number" && nowMs > doc.expires_at_ms;
+  return typeof doc?.expires_at_ms !== "number" || nowMs > doc.expires_at_ms;
+}
+
+/**
+ * PRDR-149: a policy file is a small regular file, or it is not read.
+ * A committed symlink to `/dev/zero` — git stores mode 120000 quite happily —
+ * hung `readFileSync` and stalled every tool call in the directory against a
+ * 900-second registered timeout.
+ */
+const POLICY_MAX_BYTES = 256 * 1024;
+
+function readPolicyFile(file: string): string | null {
+  try {
+    const st = statSync(file);
+    if (!st.isFile() || st.size > POLICY_MAX_BYTES) return null;
+    return readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
 }
 
 function commandOf(toolInput: unknown): string {
@@ -94,22 +112,53 @@ interface SurfaceDoc {
   readonly expires_at_ms?: unknown;
 }
 
+/**
+ * PRDR-149: the re-feed text the hook emits, stated HERE rather than taken
+ * from the file it reads.
+ *
+ * A literal, not an import: ARCH-1 keeps `src/plugin/**` on the accelerant
+ * side and the bundle deliberately free of the kernel — the same reason
+ * `GATE_TIMEOUT_MS` was a literal. `tests/plugin/hook.test.ts` asserts this
+ * equals `hook-policy.ts`'s `RUN_REFEED_TEXT`, so the two cannot drift.
+ */
+const REFEED_TEXT =
+  "Detent run in flight: tickets are still claimable or claimed. Continue the loop — " +
+  "call the referee's `next` tool and proceed with the next legal move; end the session " +
+  "only when the pool is empty and the outcome has been presented. " +
+  "(This gate fires once; the referee re-verifies everything regardless — P2.)";
+
 /** The PreToolUse decision; `null` means silence (no opinion — never an explicit allow). */
 function decidePreToolUse(payload: HookPayload, nowMs: number): string | null {
   const cwd = payloadCwd(payload);
-  let raw: string;
-  try {
-    raw = readFileSync(path.join(cwd, ".detent", HOOK_SURFACE_FILE), "utf8");
-  } catch {
-    /* Absent surface: no Detent attempt in flight — the ambient hook stays silent. */
-    return null;
-  }
+  /* Absent surface: no Detent attempt in flight — the ambient hook stays silent. */
+  const raw = readPolicyFile(path.join(cwd, ".detent", HOOK_SURFACE_FILE));
+  if (raw === null) return null;
   let cfg: SurfaceDoc | null;
   try {
     cfg = JSON.parse(raw) as SurfaceDoc | null;
   } catch {
+    /**
+     * PRDR-149 considered treating this as ABSENT, because a repository can
+     * commit a malformed file and brick every session in the directory. Kept
+     * as fail-closed deliberately: that denial-of-service is LOUD — the reason
+     * names the file, and deleting it is the remedy — whereas a corrupted
+     * policy read as absent stops containing SILENTLY. A visible refusal beats
+     * an invisible gap (P5). The bounded read above removes the variant that
+     * was neither: a file that hangs rather than answers.
+     */
     return denyJson(
       `DENY: ${path.join(".detent", HOOK_SURFACE_FILE)} exists but is unreadable — a declared surface that cannot be honored fails closed (P5).`,
+    );
+  }
+  /**
+   * PRDR-149: a document that parses to `null` or a non-object is not a policy
+   * — it is as unusable as unparseable text, and takes the same fail-closed
+   * answer. Checked BEFORE the expiry rule, because a non-object cannot carry
+   * an expiry and would otherwise slip through as "expired".
+   */
+  if (typeof cfg !== "object" || cfg === null) {
+    return denyJson(
+      `DENY: ${path.join(".detent", HOOK_SURFACE_FILE)} exists but declares no surface — a policy that cannot be honored fails closed (P5).`,
     );
   }
   if (expired(cfg, nowMs)) return null;
@@ -131,34 +180,88 @@ function decidePreToolUse(payload: HookPayload, nowMs: number): string | null {
     }
   }
 
-  /** T-120 (D-27): a driver policy denies every path'd call — sequencing only. */
-  if (cfg?.driver === true) {
-    if (pathOf(payload.tool_input) === null) return null;
+/**
+ * D-27 (PRDR-180): what a driver may still do while a claim is active.
+ *
+ * The driver sequences; every change goes through a referee-admitted session,
+ * and every path'd call is already denied below. What walked past that rule was
+ * EXECUTION, which carries no path: `Bash` could write a file with a redirect,
+ * run a gate outside the referee's classification, or spawn a billable model
+ * session off the ledger — under a policy whose own message reads "the driver
+ * sequences, never edits".
+ *
+ * D-27 is the authority and it is broader than `skills/run/SKILL.md` said: "no
+ * model-issued request applies a transition, consumes a budget, or writes
+ * outside surface without a validator or gate result in between." A redirect
+ * writes; `claude -p` consumes a budget. The skill text named only
+ * gate-matching Bash and has been corrected to match the rule rather than the
+ * rule narrowed to match it — the opposite of the PRDR-170 mistake.
+ */
+const DRIVER_DENIED_TOOLS: ReadonlySet<string> = new Set([
+  "Bash",
+  "BashOutput",
+  "KillShell",
+  "KillBash",
+  /* D-28″ (PRDR-215): the spawn names are the guard's one list, not a second copy. */
+  ...SPAWN_TOOLS,
+  "WebFetch",
+]);
+
+
+/** T-120 (D-27): a driver policy denies every path'd call, and every execution — sequencing only. */
+function driverDecision(tool: string, toolInput: unknown): string | null {
+  const reason =
+    "DENY: the driver sequences, never edits (D-27). A Detent claim is active; every change happens " +
+    "through referee-admitted sessions, and state flows through referee tools alone.";
+  if (DRIVER_DENIED_TOOLS.has(tool)) {
     return denyJson(
-      "DENY: the driver sequences, never edits (D-27). A Detent claim is active; every change happens " +
-        "through referee-admitted sessions, and state flows through referee tools alone.",
+      `${reason} \`${tool}\` runs commands, which is neither: a shell can write a file, run a gate outside ` +
+        "the referee's classification, or start a billable session off the ledger.",
     );
   }
+  if (pathOf(toolInput) === null) return null;
+  return denyJson(reason);
+}
+
+  if (cfg?.driver === true) return driverDecision(tool, payload.tool_input);
 
   const decision = guardToolUse(tool, payload.tool_input, {
     surface: strings(cfg?.surface),
     protectedGlobs: strings(cfg?.protected),
     workRoot: cwd,
   });
-  return decision.decision === "allow" ? null : denyJson(decision.reason);
+  /**
+   * S-2‴ (PRDR-122): only a DENY speaks. `allow` and `abstain` are both silence
+   * here — this hook can narrow what the permission rules would grant, never
+   * widen it (D-29), so an abstention is precisely "no opinion" and must not
+   * become a refusal.
+   */
+  return decision.decision === "deny" ? denyJson(decision.reason) : null;
 }
 
-/** Executes the scoped gate for the Stop decision (the oracle's `subprocess.run`). */
-function runScopedGate(command: string, cwd: string): { green: boolean; outputTail: string } {
-  const result = spawnSync(command, {
-    shell: true,
-    cwd,
-    encoding: "utf8",
-    timeout: GATE_TIMEOUT_MS,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  const merged = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-  return { green: result.status === 0, outputTail: merged.slice(-1500) };
+
+/**
+ * D-27‴ (PRDR-099): is the session ending one that should pick the run up?
+ * The stage file names the referee that drives the run, in a claim's currency
+ * (PRDR-079), and the breaker's own question decides first: a driver verifiably
+ * gone on this host has left the run to whoever is here, which is the case the
+ * re-feed exists for. A live one, or one on another host, is asked whether it
+ * serves this session: the same session id, or, after a `/clear` gave the
+ * conversation a new one, the same Claude process, this hook's parent, among
+ * the pids the referee runs under. Anything else is a session opened beside a
+ * run another session drives, and is told nothing. A file that names no driver,
+ * or a driver tied to no session, is answered as before, since nothing in it
+ * tells the sessions apart.
+ */
+function addressed(driver: unknown, payload: HookPayload): boolean {
+  if (driver === null || typeof driver !== "object") return true;
+  const d = driver as { pid?: unknown; host?: unknown; session_id?: unknown; parents?: unknown };
+  if (typeof d.pid !== "number") return true;
+  const sessionId = typeof d.session_id === "string" ? d.session_id : null;
+  const parents = Array.isArray(d.parents) ? d.parents.filter((p): p is number => typeof p === "number") : [];
+  if (sessionId === null && parents.length === 0) return true;
+  if (claimBreakable({ pid: d.pid, host: typeof d.host === "string" ? d.host : undefined }, pidAlive, hostname())) return true;
+  return (sessionId !== null && payload.session_id === sessionId) || parents.includes(process.ppid);
 }
 
 /**
@@ -170,30 +273,45 @@ function runScopedGate(command: string, cwd: string): { green: boolean; outputTa
  */
 async function decideStop(payload: HookPayload, nowMs: number): Promise<string | null> {
   const cwd = payloadCwd(payload);
-  let stage = "";
-  let gateCmd: string | null = null;
-  let refeed = "";
-  let parsed: { stage?: unknown; gate_cmd?: unknown; run_refeed?: unknown; expires_at_ms?: unknown } | null;
+  const rawStage = readPolicyFile(path.join(cwd, ".detent", HOOK_STAGE_FILE));
+  if (rawStage === null) return null;
+  let parsed: { run_refeed?: unknown; expires_at_ms?: unknown; driver?: unknown } | null;
   try {
-    parsed = JSON.parse(readFileSync(path.join(cwd, ".detent", HOOK_STAGE_FILE), "utf8")) as typeof parsed;
-    stage = typeof parsed?.stage === "string" ? parsed.stage : "";
-    gateCmd = typeof parsed?.gate_cmd === "string" ? parsed.gate_cmd : null;
-    refeed = typeof parsed?.run_refeed === "string" ? parsed.run_refeed : "";
+    parsed = JSON.parse(rawStage) as typeof parsed;
   } catch {
     return null;
   }
+  /* D-27″ (PRDR-128): an absent expiry is expired — a planted file cannot linger. */
   if (expired(parsed, nowMs)) return null;
+  /**
+   * PRDR-149: whether to re-feed comes from the file; WHAT IS SAID does not.
+   * The string used to be echoed verbatim and unbounded into a `block` reason
+   * that lands in every session of every plugin user who opens the directory —
+   * a stranger's text arriving as an instruction. Detent is the only
+   * legitimate writer and it writes a constant, so echoing bought nothing.
+   */
+  const refeed = typeof parsed?.run_refeed === "string" && parsed.run_refeed !== "" ? REFEED_TEXT : "";
   const stopHookActive = Boolean(payload.stop_hook_active);
   /**
    * T-120 loop persistence: while the referee says work remains, ending the
-   * session gets one deterministic nudge back into the loop (the re-feed
-   * pattern; `stop_hook_active` bounds it to a single firing).
+   * session that drives the run gets one deterministic nudge back into the
+   * loop (the re-feed pattern; `stop_hook_active` bounds it to a single
+   * firing). Which session that is, `addressed` decides (D-27‴).
+   *
+   * This is now the ONLY thing the Stop path does. `gate_cmd` was read from
+   * this same file and run through a shell — and because the hook carries no
+   * matcher it runs in every session of every user who installed the plugin, so
+   * a repository that merely COMMITTED a `stage.json` executed arbitrary code,
+   * with no run in flight and nothing approved. Removing it costs nothing real:
+   * nothing in the product has ever written a non-null `gate_cmd`
+   * (`refreshRunRefeed` hard-codes `null`, and a test asserts it), so the path
+   * had no producer, and the stop gate was always an accelerant the referee
+   * re-runs regardless (P2).
    */
-  if (refeed !== "" && !stopHookActive) {
+  if (refeed !== "" && !stopHookActive && addressed(parsed?.driver, payload)) {
     return JSON.stringify({ decision: "block", reason: refeed });
   }
-  const decision = await stopGate({ stage, gateCmd, stopHookActive }, async (command) => runScopedGate(command, cwd));
-  return decision.decision === "allow" ? null : JSON.stringify({ decision: "block", reason: decision.reason });
+  return null;
 }
 
 /**

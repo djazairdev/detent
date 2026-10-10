@@ -1,6 +1,7 @@
-import { parseArtifact } from "../../schemas/common.js";
+import { SCHEMA_VERSION, parseArtifact } from "../../schemas/common.js";
 import { reviewSchema, type Hypothesis } from "../../schemas/records.js";
 import type { Ticket } from "../../schemas/ticket.js";
+import { reviewTags } from "../../schemas/ticket.js";
 import { reviewApprove, reviewChanges, type KernelEvent } from "../events.js";
 
 /**
@@ -27,7 +28,7 @@ export const REVIEWER_TICKET_KEYS = ["id", "title", "acceptance_criteria", "non_
 
 /** A-5's exact shape; skeletons.test parses it through `reviewSchema`. */
 export function reviewSkeleton(): Record<string, unknown> {
-  return { schema_version: 1, verdict: "approve", changes: [] };
+  return { schema_version: SCHEMA_VERSION, verdict: "approve", changes: [] };
 }
 
 /**
@@ -38,7 +39,28 @@ export function reviewSkeleton(): Record<string, unknown> {
  * reviewer receives the recent record; the review prompt tells it a recorded
  * grant makes the granted file in-scope.
  */
-const OPERATOR_RECORD_NOTES = 8;
+export const OPERATOR_RECORD_NOTES = 8;
+
+/**
+ * PRDR-236: ONE definition of "the operator record", because there are now two
+ * readers of it and they must not drift.
+ *
+ * PRDR-080 gave this to the reviewer and stopped there, and of the three
+ * operator acts its comment lists, requeue guidance is the one with no audience
+ * except the ATTEMPTING session — a grant and a claim break are facts a judge
+ * needs, guidance is an instruction. So C-12's remedy was recorded on the
+ * ticket, quoted back by the reviewer, and never once handed to the session the
+ * generation was re-opened for. On gate-313 that had t-s01-012 rebuild itself
+ * from its acceptance criteria alone and reproduce the exact defect its
+ * guidance described.
+ *
+ * The window is shared with the reviewer rather than re-chosen: a long-lived
+ * ticket must not push its own criteria out of context to make room for its
+ * history.
+ */
+export function operatorRecord(ticket: Ticket): Array<{ readonly author: string; readonly text: string }> {
+  return ticket.notes.slice(-OPERATOR_RECORD_NOTES).map((n) => ({ author: n.author, text: n.text }));
+}
 
 function buildReviewerInputs(
   ticket: Ticket,
@@ -52,10 +74,9 @@ function buildReviewerInputs(
       acceptance_criteria: ticket.acceptance_criteria,
       non_goals: ticket.non_goals,
     },
-    operator_record: ticket.notes.slice(-OPERATOR_RECORD_NOTES).map((n) => ({ author: n.author, text: n.text })),
+    operator_record: operatorRecord(ticket),
     expected_output: reviewSkeleton(),
-    expected_output_note:
-      'verdict "changes" requires at least one {tag: correctness|requirement|scope|rules, finding, file?} entry; the validator is strict — no extra keys, and schema_version is required.',
+    expected_output_note: reviewInputsNote(),
     diff,
     hypothesis,
   };
@@ -69,8 +90,15 @@ export interface ReviewDeps {
 
 export type ReviewOutcome = { readonly kind: "event"; readonly event: KernelEvent } | { readonly kind: "breaker"; readonly reason: string };
 
-export async function reviewStage(ticket: Ticket, diff: string, hypothesis: Hypothesis | null, deps: ReviewDeps): Promise<ReviewOutcome> {
-  await deps.launch(buildReviewerInputs(ticket, diff, hypothesis));
+export async function reviewStage(
+  ticket: Ticket,
+  diff: string,
+  hypothesis: Hypothesis | null,
+  deps: ReviewDeps,
+  /** A-1⁗ (PRDR-121): mechanical evidence about the ticket's declared interface. */
+  evidence: Record<string, unknown> = {},
+): Promise<ReviewOutcome> {
+  await deps.launch({ ...buildReviewerInputs(ticket, diff, hypothesis), ...evidence });
 
   const raw = deps.readArtifact();
   const parsed = raw === null ? null : parseArtifact(reviewSchema, raw);
@@ -82,4 +110,17 @@ export async function reviewStage(ticket: Ticket, diff: string, hypothesis: Hypo
   }
   deps.note(`review changes: ${parsed.value.changes.map((c) => c.tag).join(",")}`);
   return { kind: "event", event: reviewChanges(parsed.value) };
+}
+
+/**
+ * PRDR-143: the instruction a reviewer is given, exported so a test can compare
+ * it against `reviewTags` rather than against a hand-retyped copy. It was an
+ * inline literal listing the four tags, and nothing checked it against the
+ * validator that judges the artifact it describes.
+ */
+export function reviewInputsNote(): string {
+  return (
+    `verdict "changes" requires at least one {tag: ${reviewTags.join("|")}, finding, file?} entry; ` +
+    "the validator is strict — no extra keys, and schema_version is required."
+  );
 }

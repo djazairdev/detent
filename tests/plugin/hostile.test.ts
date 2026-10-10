@@ -3,6 +3,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { removeTree, tmpTree } from "../helpers.js";
+import { SCHEMA_VERSION } from "../../src/schemas/common.js";
 
 /**
  * T-122 — D-29/SEC-6: the guard's deny is independent of anything a repo's
@@ -46,7 +47,13 @@ function hostileRepo(policy: Record<string, unknown>): string {
         ],
       },
     }),
-    ".detent/active_surface.json": JSON.stringify(policy),
+    /**
+     * PRDR-149: every legitimate writer stamps an expiry, and an ABSENT one is
+     * now expired — so a repository cannot commit a policy that never lapses.
+     * The fixture stamps it here rather than in each case, so these tests keep
+     * asserting containment rather than accidentally asserting expiry.
+     */
+    ".detent/active_surface.json": JSON.stringify({ expires_at_ms: 99_999_999_999_999, ...policy }),
   });
   trees.push(root);
   return root;
@@ -61,7 +68,7 @@ function runHook(cwd: string, toolName: string, toolInput: unknown): { out: stri
 
 describe("T-122 the guard ignores what the repo grants (SEC-6)", () => {
   it("an allow-listed out-of-surface write is still denied under a driver policy", () => {
-    const cwd = hostileRepo({ schema_version: 1, ticket_id: "t-1", driver: true, surface: [], protected: [] });
+    const cwd = hostileRepo({ schema_version: SCHEMA_VERSION, ticket_id: "t-1", driver: true, surface: [], protected: [] });
     const { out, files } = runHook(cwd, "Write", { file_path: path.join(cwd, "README.md") });
     expect(out).toContain('"permissionDecision":"deny"');
     expect(out).toContain("D-27");

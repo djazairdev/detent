@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { initLayout, stateDir } from "../../src/fs/layout.js";
@@ -13,6 +13,7 @@ import {
 } from "../../src/init/machine.js";
 import { INIT_PHASES, INTERRUPTS, INTERRUPT_PHASE } from "../../src/schemas/init.js";
 import { git, gitInit, removeTree, tmpTree, writeTree } from "../helpers.js";
+import { SCHEMA_VERSION } from "../../src/schemas/common.js";
 
 /** T-060 — the init phase machine: C-1 root-only, C-5 closed interrupts, C-8 replay. */
 
@@ -73,16 +74,33 @@ describe("T-060 C-5: the interrupt set is closed", () => {
       ["AWAIT_APPROVAL", "AWAIT_BINDING_CHOICE", "AWAIT_DOCS", "AWAIT_INFO", "AWAIT_SETUP_CONSENT"],
     );
     for (const interrupt of INTERRUPTS) {
-      expect(INIT_PHASES).toContain(INTERRUPT_PHASE[interrupt]);
+      for (const phase of INTERRUPT_PHASE[interrupt]) expect(INIT_PHASES).toContain(phase);
     }
+    /**
+     * PRDR-282: AWAIT_INFO is raised at DECIDE as well as at PRESENT (C-3⁗);
+     * PRDR-284: and at VALIDATE, for a blocker left at its ceiling or a checker
+     * it cannot make green (C-2¹⁴). The set stays five (C-5).
+     */
+    expect(INTERRUPT_PHASE).toEqual({
+      AWAIT_DOCS: ["DISCOVER"],
+      AWAIT_INFO: ["DECIDE", "VALIDATE", "PRESENT"],
+      AWAIT_BINDING_CHOICE: ["DETERMINE_VERIFICATION"],
+      AWAIT_SETUP_CONSENT: ["DETERMINE_VERIFICATION"],
+      AWAIT_APPROVAL: ["PRESENT"],
+    });
   });
 
-  it("the phase order is C-4.1's", () => {
+  /** PRDR-281: AUDIT, the first of the phases C-2⁶ adds, directly after DISCOVER; PRDR-282: DECIDE after it; PRDR-283, PRDR-284: WRITE, then VALIDATE. */
+  it("the phase order is C-4.1's, as C-2⁶ amends it", () => {
     expect(INIT_PHASES).toEqual([
       "INIT_FS",
       "DISCOVER",
-      "ANALYZE",
+      "AUDIT",
+      "DECIDE",
+      "WRITE",
+      "VALIDATE",
       "DETERMINE_VERIFICATION",
+      "SLICE",
       "PLAN",
       "PREPARE_AGENTS",
       "PRESENT",
@@ -91,35 +109,35 @@ describe("T-060 C-5: the interrupt set is closed", () => {
 });
 
 describe("T-060 C-8: replay from the first drifted checkpoint", () => {
-  it("editing a doc re-executes ANALYZE forward only — DISCOVER is reused", async () => {
+  it("editing a doc re-executes SLICE forward only — DISCOVER is reused", async () => {
     const root = repo({ "PRD.md": "# v1\n" });
     const log: string[] = [];
     const handlers = (): PhaseHandler[] => [
       probe("INIT_FS", () => listingDigest([".detent"]), log),
       /** DISCOVER reads the LISTING: which docs exist. */
       probe("DISCOVER", () => listingDigest(["PRD.md"]), log),
-      /** ANALYZE reads the CONTENTS: what they say. */
-      probe("ANALYZE", () => contentsDigest(root, ["PRD.md"]), log),
+      /** SLICE reads the CONTENTS: what they say. */
+      probe("SLICE", () => contentsDigest(root, ["PRD.md"]), log),
       probe("PLAN", () => listingDigest(["plan"]), log),
     ];
 
     const first = await runInit(root, handlers());
     expect(first.exitCode).toBe(0);
-    expect(log).toEqual(["INIT_FS", "DISCOVER", "ANALYZE", "PLAN"]);
+    expect(log).toEqual(["INIT_FS", "DISCOVER", "SLICE", "PLAN"]);
 
     /* Editing nothing re-executes nothing (C-8's AC, second half). */
     log.length = 0;
     const unchanged = await runInit(root, handlers());
     expect(log).toEqual([]);
     expect(unchanged.replayedFrom).toBeNull();
-    expect(unchanged.reused).toEqual(["INIT_FS", "DISCOVER", "ANALYZE", "PLAN"]);
+    expect(unchanged.reused).toEqual(["INIT_FS", "DISCOVER", "SLICE", "PLAN"]);
 
-    /* Editing PRD.md re-executes ANALYZE forward — and NOT discovery. */
+    /* Editing PRD.md re-executes SLICE forward — and NOT discovery. */
     log.length = 0;
     writeTree(root, { "PRD.md": "# v2 — now with more spec\n" });
     const edited = await runInit(root, handlers());
-    expect(log).toEqual(["ANALYZE", "PLAN"]);
-    expect(edited.replayedFrom).toBe("ANALYZE");
+    expect(log).toEqual(["SLICE", "PLAN"]);
+    expect(edited.replayedFrom).toBe("SLICE");
     expect(edited.reused).toEqual(["INIT_FS", "DISCOVER"]);
   });
 
@@ -129,7 +147,7 @@ describe("T-060 C-8: replay from the first drifted checkpoint", () => {
     const handlers = (docs: string[]): PhaseHandler[] => [
       probe("INIT_FS", () => listingDigest([".detent"]), log),
       probe("DISCOVER", () => listingDigest(docs), log),
-      probe("ANALYZE", () => contentsDigest(root, docs), log),
+      probe("SLICE", () => contentsDigest(root, docs), log),
     ];
 
     await runInit(root, handlers(["PRD.md"]));
@@ -137,7 +155,7 @@ describe("T-060 C-8: replay from the first drifted checkpoint", () => {
     writeTree(root, { "SRS.md": "# also\n" });
     const result = await runInit(root, handlers(["PRD.md", "SRS.md"]));
     expect(result.replayedFrom).toBe("DISCOVER");
-    expect(log).toEqual(["DISCOVER", "ANALYZE"]);
+    expect(log).toEqual(["DISCOVER", "SLICE"]);
   });
 
   it("an interrupted phase is not checkpointed — a re-run resumes exactly there", async () => {
@@ -156,7 +174,7 @@ describe("T-060 C-8: replay from the first drifted checkpoint", () => {
             : { kind: "complete", outputs: {} };
         },
       },
-      probe("ANALYZE", () => contentsDigest(root, ["PRD.md"]), log),
+      probe("SLICE", () => contentsDigest(root, ["PRD.md"]), log),
     ];
 
     const stopped = await runInit(root, handlers);
@@ -172,7 +190,7 @@ describe("T-060 C-8: replay from the first drifted checkpoint", () => {
     interrupts = false;
     const resumed = await runInit(root, handlers);
     expect(resumed.exitCode).toBe(0);
-    expect(log).toEqual(["DISCOVER", "ANALYZE"]);
+    expect(log).toEqual(["DISCOVER", "SLICE"]);
   });
 
   it("outputs flow forward on the bus — a later phase reads an earlier one's", async () => {
@@ -185,7 +203,7 @@ describe("T-060 C-8: replay from the first drifted checkpoint", () => {
         run: async () => ({ kind: "complete", outputs: { docs: ["PRD.md"] } }),
       },
       {
-        phase: "ANALYZE",
+        phase: "SLICE",
         digest: () => listingDigest(["x"]),
         run: async (ctx) => {
           seen.push(ctx.outputs["DISCOVER"]?.["docs"]);
@@ -205,7 +223,7 @@ describe("T-060 C-8: approval state", () => {
     writeTree(root, { ".detent/plan/t-1.json": '{"id":"t-1"}\n' });
     writeFileSync(
       path.join(stateDir(root), "plan", "approval.json"),
-      JSON.stringify({ schema_version: 1, approved_by: "u", at: "2026-08-18T00:00:00.000Z", plan_hash: planHash(root) }),
+      JSON.stringify({ schema_version: SCHEMA_VERSION, approved_by: "u", at: "2026-08-18T00:00:00.000Z", plan_hash: planHash(root) }),
     );
 
     const log: string[] = [];
@@ -227,7 +245,7 @@ describe("T-060 C-8: approval state", () => {
     writeTree(root, { ".detent/plan/t-1.json": '{"id":"t-1"}\n' });
     writeFileSync(
       path.join(stateDir(root), "plan", "approval.json"),
-      JSON.stringify({ schema_version: 1, approved_by: "u", at: "2026-08-18T00:00:00.000Z", plan_hash: planHash(root) }),
+      JSON.stringify({ schema_version: SCHEMA_VERSION, approved_by: "u", at: "2026-08-18T00:00:00.000Z", plan_hash: planHash(root) }),
     );
     expect(approvalState(root).stale).toBe(false);
 
@@ -283,5 +301,77 @@ describe("T-060 digests are honest", () => {
     await runInit(root, [probe("DISCOVER", () => listingDigest(["x"]), log)]);
     expect(log).toEqual(["DISCOVER"]);
     expect(readFileSync(path.join(stateDir(root), "state", "DISCOVER.json"), "utf8")).toContain("inputs_hash");
+  });
+});
+
+/**
+ * C-9 / ARCH-2 (PRDR-181) — both drivers read an approval identically.
+ *
+ * `approvalState` — the plugin referee's reader — cast the file as
+ * `{ plan_hash?: string }` and treated any object carrying a matching hash as
+ * approved, while `kernel/run.ts` parses the same file through
+ * `approvalSchema`. So a hand-written `{"plan_hash": "…"}` with no approver, no
+ * timestamp and no schema version was refused by the headless path and accepted
+ * by the plugin one, for the same file. An approval is a human's signature on a
+ * plan.
+ */
+describe("C-9 the approval reader is the schema, not a cast", () => {
+  it("refuses an approval that only carries a plan hash", () => {
+    const root = tmpTree({});
+    roots.push(root);
+    gitInit(root);
+    mkdirSync(path.join(stateDir(root), "plan"), { recursive: true });
+    writeFileSync(path.join(stateDir(root), "plan", "approval.json"), JSON.stringify({ plan_hash: "a".repeat(64) }));
+    expect(approvalState(root).approved, "a shape the writer cannot produce is not an approval").toBe(false);
+  });
+
+  it("accepts one the product actually writes", () => {
+    const root = tmpTree({});
+    roots.push(root);
+    gitInit(root);
+    mkdirSync(path.join(stateDir(root), "plan"), { recursive: true });
+    writeFileSync(
+      path.join(stateDir(root), "plan", "approval.json"),
+      JSON.stringify({ schema_version: SCHEMA_VERSION, plan_hash: "a".repeat(64), approved_by: "alice", at: "2026-09-08T00:00:00.000Z" }),
+    );
+    expect(approvalState(root).approved).toBe(true);
+  });
+});
+
+/**
+ * PRDR-166 — a re-run that read nothing new says so.
+ *
+ * An operator who answers an AWAIT_INFO question in a file DISCOVER does not
+ * match gets the identical question back with no signal that the answer was
+ * missed, which is indistinguishable from an answer the planner judged
+ * inadequate. The machine knows: it reused DISCOVER, so the document set did
+ * not change. That fact was already computed and simply never said.
+ */
+describe("PRDR-166 a repeated AWAIT_INFO says whether the documents changed", () => {
+  const asking = (phase: (typeof INIT_PHASES)[number], digest: () => string): PhaseHandler => ({
+    phase,
+    digest,
+    run: async () => ({ kind: "interrupt", interrupt: "AWAIT_INFO", message: "1 blocking question(s)", items: ["q"] }),
+  });
+
+  it("tells the operator the document set is unchanged when DISCOVER was reused", async () => {
+    const root = repo({ "PRD.md": "# v1\n" });
+    const log: string[] = [];
+    const handlers = (): PhaseHandler[] => [
+      probe("INIT_FS", () => listingDigest([".detent"]), log),
+      probe("DISCOVER", () => listingDigest(["PRD.md"]), log),
+      /* PRDR-282: PRESENT, where C-3′'s questions are asked; the machine refuses AWAIT_INFO from a phase INTERRUPT_PHASE does not list. */
+      asking("PRESENT", () => contentsDigest(root, ["PRD.md"])),
+    ];
+
+    /* First ask: DISCOVER ran, so nothing is claimed about the documents. */
+    const first = await runInit(root, handlers());
+    expect(first.interrupt?.interrupt).toBe("AWAIT_INFO");
+    expect(first.interrupt?.message ?? "").not.toContain("unchanged");
+
+    /* Second ask with nothing edited: DISCOVER is reused, and the message says so. */
+    const again = await runInit(root, handlers());
+    expect(again.reused).toContain("DISCOVER");
+    expect(again.interrupt?.message ?? "").toContain("unchanged");
   });
 });

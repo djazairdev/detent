@@ -1,13 +1,23 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  WorktreeConflictError,
+  changedFiles,
+  commitPatch,
+  ensureWorktree,
+  installTrailerHook,
+  mergeWorktree,
   commitsOn,
   ensureRunBranch,
   parseTicketTrailers,
   resolveBaseRef,
+  snapshotRefs,
+  stageAll,
   worktreePath,
 } from "../../src/kernel/git.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { EXIT_HUMAN_GATED, EXIT_OK, run } from "../../src/kernel/run.js";
 import { readTicket } from "../../src/kernel/tickets/readers.js";
 import { MockBackend, type StageFn } from "../../src/sessions/mock.js";
@@ -216,5 +226,284 @@ describe("T-042 V-5: the run baseline", () => {
     git(root, "branch", "-q", "-m", "main", "old-main");
     git(root, "branch", "-q", "-m", "old-main", "renamed-away");
     expect(resolveBaseRef(root, { branch: runBranch.branch, base: "main" })).toBeNull();
+  });
+});
+
+/**
+ * P7′ (PRDR-130) — a git call that could not run is not a git call that found
+ * nothing.
+ *
+ * `git()` ran without an explicit `maxBuffer`, so Node's 1 MB default threw
+ * ENOBUFS on any larger output and every wrapper turned the throw into an
+ * empty value. One `null` stood for two different facts, and three controls
+ * read the wrong one: the reviewer got `""` for a diff (under the truncation
+ * cap, so the banner never fired), `changedFiles` returned empty so B-4 minted
+ * no risk label, and `snapshotRefs` returned an empty map, after which the
+ * base-branch guard treated EVERY local branch as newly created and deleted it.
+ */
+describe("P7′ git output over 1 MB, and failure that is not absence", () => {
+  function repoWithLargeCommit(): { root: string; sha: string } {
+    const root = mkdtempSync(path.join(tmpdir(), "detent-big-"));
+    roots.push(root);
+    git(root, "init", "-q", "-b", "main");
+    git(root, "config", "user.email", "t@t");
+    git(root, "config", "user.name", "t");
+    writeTree(root, { "seed.txt": "seed\n" });
+    git(root, "add", "-A");
+    git(root, "commit", "-q", "-m", "init");
+    /* Comfortably over Node's 1 MB execFileSync default — a lockfile's size. */
+    writeTree(root, { "big.txt": `${"lorem ipsum dolor sit amet\n".repeat(60_000)}` });
+    git(root, "add", "-A");
+    git(root, "commit", "-q", "-m", "big");
+    return { root, sha: git(root, "rev-parse", "HEAD").trim() };
+  }
+
+  it("a commit larger than 1 MB reaches the reviewer as a real diff, not as an empty string", () => {
+    const { root, sha } = repoWithLargeCommit();
+    const patch = commitPatch(root, sha, []);
+    expect(patch.length).toBeGreaterThan(1_000_000);
+    expect(patch).toContain("big.txt");
+  });
+
+  /* Guard, not a reproduction: `--name-only` output stays small, so this call was never the one overflowing. */
+  it("changedFiles still answers for a commit that size — the fix does not over-correct", () => {
+    const { root } = repoWithLargeCommit();
+    expect(changedFiles(root, "HEAD~1")).toContain("big.txt");
+  });
+
+  /**
+   * The only unrecoverable path in the set. `snapshotRefs` returned an empty
+   * map when its single `for-each-ref` could not run, and `enforceBaseGuard`'s
+   * "a brand-new non-run branch is also a write" loop then matched every
+   * branch and ran `update-ref -d` on each — `main` included.
+   */
+  it("a snapshot that could not be TAKEN raises, so the base guard never mistakes it for a repo with no branches", () => {
+    expect(() => snapshotRefs(path.join(tmpdir(), "detent-does-not-exist-xyz"))).toThrow();
+  });
+
+  it("a git call that RAN and answered non-zero is still tolerated — a root commit has no parent", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "detent-root-"));
+    roots.push(root);
+    git(root, "init", "-q", "-b", "main");
+    git(root, "config", "user.email", "t@t");
+    git(root, "config", "user.name", "t");
+    writeTree(root, { "a.txt": "1\n" });
+    git(root, "add", "-A");
+    git(root, "commit", "-q", "-m", "root");
+    /* `diff <sha>^ <sha>` exits non-zero here; `show` answers instead. */
+    expect(commitPatch(root, git(root, "rev-parse", "HEAD").trim(), [])).toContain("a.txt");
+  });
+});
+
+/**
+ * B-1′ (PRDR-146) — the trailer hook preserves what it finds.
+ *
+ * `installTrailerHook` wrote `prepare-commit-msg` unconditionally at the start
+ * of every run, destroying an operator's commit linting, signing or
+ * issue-tracker hook with nothing said and nothing kept.
+ */
+describe("B-1′ installTrailerHook does not destroy a hook the operator already had", () => {
+  function bareRepo(): string {
+    const root = mkdtempSync(path.join(tmpdir(), "detent-hook-"));
+    roots.push(root);
+    git(root, "init", "-q", "-b", "main");
+    git(root, "config", "user.email", "t@t");
+    git(root, "config", "user.name", "t");
+    writeTree(root, { "a.txt": "1\n" });
+    git(root, "add", "-A");
+    git(root, "commit", "-q", "-m", "init");
+    return root;
+  }
+  const hookPath = (root: string): string =>
+    path.resolve(root, git(root, "rev-parse", "--git-common-dir").trim(), "hooks", "prepare-commit-msg");
+
+  it("a foreign hook is moved aside, recoverable, and the caller is told where", () => {
+    const root = bareRepo();
+    const theirs = "#!/bin/sh\n# the operator's own commit linter\nexit 0\n";
+    const hook = hookPath(root);
+    mkdirSync(path.dirname(hook), { recursive: true });
+    writeFileSync(hook, theirs);
+
+    const preserved = installTrailerHook(root);
+    expect(preserved, "a foreign hook must be reported, not silently replaced").not.toBeNull();
+    expect(readFileSync(preserved as string, "utf8")).toBe(theirs);
+    /* And Detent's own hook is in place. */
+    expect(readFileSync(hook, "utf8")).toContain("Detent-Ticket");
+  });
+
+  it("re-installing over Detent's own hook is idempotent — no backup accumulates", () => {
+    const root = bareRepo();
+    expect(installTrailerHook(root)).toBeNull();
+    expect(installTrailerHook(root)).toBeNull();
+    expect(installTrailerHook(root)).toBeNull();
+    expect(existsSync(`${hookPath(root)}.before-detent`)).toBe(false);
+  });
+
+  it("a second foreign hook does not overwrite the first rescue — the original survives", () => {
+    const root = bareRepo();
+    const hook = hookPath(root);
+    mkdirSync(path.dirname(hook), { recursive: true });
+    writeFileSync(hook, "#!/bin/sh\n# original\n");
+    const first = installTrailerHook(root) as string;
+    writeFileSync(hook, "#!/bin/sh\n# a later foreign hook\n");
+    const second = installTrailerHook(root) as string;
+    expect(second).not.toBe(first);
+    expect(readFileSync(first, "utf8")).toContain("# original");
+  });
+});
+
+/**
+ * B-2′ (PRDR-145a) — a worktree merge that conflicts is an outcome.
+ *
+ * `mergeWorktree` ran `git merge --no-ff` unguarded and then removed the
+ * worktree and deleted the branch unconditionally, so two tickets touching one
+ * file left a ticket DONE with its work unmerged, an orphaned worktree and a
+ * stale branch — surfacing as exit 1 from an unclassified throw. Nothing
+ * enforces surface disjointness, so ordinary planning reaches this.
+ */
+describe("B-2′ a conflicting worktree merge keeps the work and says so", () => {
+  it("raises WorktreeConflictError, leaves the branch and worktree, and does not move the run branch", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "detent-wt-"));
+    roots.push(root);
+    git(root, "init", "-q", "-b", "main");
+    git(root, "config", "user.email", "t@t");
+    git(root, "config", "user.name", "t");
+    writeTree(root, { "shared.txt": "base\n" });
+    git(root, "add", "-A");
+    git(root, "commit", "-q", "-m", "base");
+
+    /* The ticket's worktree edits the file one way... */
+    const wt = ensureWorktree(root, "t1");
+    writeTree(wt, { "shared.txt": "from the ticket\n" });
+    git(wt, "add", "-A");
+    git(wt, "commit", "-q", "-m", "t1: work");
+    /* ...and the run branch edits it another. */
+    writeTree(root, { "shared.txt": "from the run branch\n" });
+    git(root, "add", "-A");
+    git(root, "commit", "-q", "-m", "run branch work");
+    const before = git(root, "rev-parse", "HEAD").trim();
+
+    let thrown: unknown = null;
+    try {
+      mergeWorktree(root, "t1");
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(WorktreeConflictError);
+    expect((thrown as WorktreeConflictError).conflicts).toContain("shared.txt");
+    /* The work survives for a human: branch kept, worktree kept, run branch unmoved. */
+    expect(git(root, "rev-parse", "HEAD").trim()).toBe(before);
+    expect(git(root, "branch", "--list", "ticket/t1").trim()).not.toBe("");
+    expect(existsSync(wt)).toBe(true);
+    /* And the tree is not left mid-merge. */
+    expect(existsSync(path.join(root, ".git", "MERGE_HEAD"))).toBe(false);
+  });
+
+  it("a clean merge still removes the worktree and deletes the branch", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "detent-wt-ok-"));
+    roots.push(root);
+    git(root, "init", "-q", "-b", "main");
+    git(root, "config", "user.email", "t@t");
+    git(root, "config", "user.name", "t");
+    writeTree(root, { "a.txt": "base\n" });
+    git(root, "add", "-A");
+    git(root, "commit", "-q", "-m", "base");
+    const wt = ensureWorktree(root, "t2");
+    writeTree(wt, { "b.txt": "new\n" });
+    git(wt, "add", "-A");
+    git(wt, "commit", "-q", "-m", "t2: work");
+
+    expect(() => mergeWorktree(root, "t2")).not.toThrow();
+    expect(existsSync(wt)).toBe(false);
+    expect(git(root, "branch", "--list", "ticket/t2").trim()).toBe("");
+    expect(existsSync(path.join(root, "b.txt"))).toBe(true);
+  });
+});
+
+/** PRDR-216: staging asks git before naming an exclusion — an ignored directory is `-A`'s own skip. */
+describe("PRDR-216 stageAll excludes only what git does not already ignore", () => {
+  function repoWithInstall(ignore: boolean): string {
+    const root = mkdtempSync(path.join(tmpdir(), "detent-stage-"));
+    roots.push(root);
+    git(root, "init", "-q", "-b", "main");
+    git(root, "config", "user.email", "t@t");
+    git(root, "config", "user.name", "t");
+    writeTree(root, { "README.md": "seed\n", ...(ignore ? { ".gitignore": "node_modules/\n" } : {}) });
+    git(root, "add", "-A");
+    git(root, "commit", "-q", "-m", "seed");
+    writeTree(root, { "src/a.ts": "export const a = 1;\n", "node_modules/x/index.js": "module.exports = 1;\n" });
+    return root;
+  }
+
+  it("an ignored install directory does not break the add, and stays out of the index", () => {
+    const root = repoWithInstall(true);
+    expect(() => stageAll(root, ["node_modules"])).not.toThrow();
+    const staged = git(root, "diff", "--cached", "--name-only");
+    expect(staged).toContain("src/a.ts");
+    expect(staged).not.toContain("node_modules");
+  });
+
+  it("an install directory the project does not ignore is excluded by pathspec, exactly as before", () => {
+    const root = repoWithInstall(false);
+    stageAll(root, ["node_modules"]);
+    const staged = git(root, "diff", "--cached", "--name-only");
+    expect(staged).toContain("src/a.ts");
+    expect(staged).not.toContain("node_modules");
+  });
+});
+
+/** Audit of PRDR-216: the commonest shape — an ignore rule and no install yet — must stage as before. */
+describe("audit of PRDR-216: an ignored directory that does not exist yet", () => {
+  it("names nothing git would refuse and stages the rest", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "detent-stage-"));
+    roots.push(root);
+    git(root, "init", "-q", "-b", "main");
+    git(root, "config", "user.email", "t@t");
+    git(root, "config", "user.name", "t");
+    writeTree(root, { "README.md": "seed\n", ".gitignore": "node_modules/\n" });
+    git(root, "add", "-A");
+    git(root, "commit", "-q", "-m", "seed");
+    writeTree(root, { "src/a.ts": "export const a = 1;\n" });
+    expect(() => stageAll(root, ["node_modules"])).not.toThrow();
+    expect(git(root, "diff", "--cached", "--name-only")).toContain("src/a.ts");
+  });
+});
+
+/** PRDR-228: finalize never stages F-1's local set, whichever path wrote into it. */
+describe("PRDR-228 stageAll leaves the run's local state out of the change set", () => {
+  it("an untracked .detent/runs artifact in the tree is not staged; the feature beside it is", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "detent-stage-"));
+    roots.push(root);
+    git(root, "init", "-q", "-b", "main");
+    git(root, "config", "user.email", "t@t");
+    git(root, "config", "user.name", "t");
+    writeTree(root, { "README.md": "seed\n" });
+    git(root, "add", "-A");
+    git(root, "commit", "-q", "-m", "seed");
+    writeTree(root, { "src/a.ts": "export const a = 1;\n", ".detent/runs/t1/blind_fix.json": "{}\n", ".detent/state/progress.json": "{}\n" });
+    stageAll(root, []);
+    const staged = git(root, "diff", "--cached", "--name-only");
+    expect(staged).toContain("src/a.ts");
+    expect(staged).not.toContain(".detent/runs");
+    expect(staged).not.toContain(".detent/state");
+  });
+});
+
+/** PRDR-229: Serena's own project directory lands in the worktree once the server is started there; finalize never stages it. */
+describe("PRDR-229 stageAll leaves Serena's project directory out of the change set", () => {
+  it("an untracked .serena/ beside the feature is not staged", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "detent-stage-"));
+    roots.push(root);
+    git(root, "init", "-q", "-b", "main");
+    git(root, "config", "user.email", "t@t");
+    git(root, "config", "user.name", "t");
+    writeTree(root, { "README.md": "seed\n" });
+    git(root, "add", "-A");
+    git(root, "commit", "-q", "-m", "seed");
+    writeTree(root, { "src/a.ts": "export const a = 1;\n", ".serena/project.yml": "project_name: x\n" });
+    stageAll(root, []);
+    const staged = git(root, "diff", "--cached", "--name-only");
+    expect(staged).toContain("src/a.ts");
+    expect(staged).not.toContain(".serena");
   });
 });

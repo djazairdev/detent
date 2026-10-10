@@ -5,6 +5,13 @@ import type { ApprovalDecision } from "../init/present.js";
  * C-7's inline approval prompt. The dual exit means declining here is not a
  * failure — the plan stays READY-unapproved and `detent run` presents it
  * again, so a user who wants to read the tickets first can simply say no.
+ *
+ * That second sentence was the whole rationale for calling a decline harmless,
+ * and until PRDR-255 it named a mechanism that did not exist: `run` refused an
+ * unapproved plan with a string sending the reader back to `init`. The exit is
+ * `offerDeferredApproval` in `kernel/run.ts`, which replays the rendering
+ * `presentStage` persisted and offers this same decision through
+ * `RunOptions.approve` — this module's `makeTtyApproval`, wired by `cli/run.ts`.
  */
 
 /** The one C-5 decision a flag may answer (T-131). */
@@ -36,6 +43,43 @@ export function makeTtyApproval(user: string): (presentation: string) => Promise
         if (answer === "l" || answer === "later" || answer === "") return { kind: "deferred" };
         process.stdout.write("  (answer y, n, or l)\n");
       }
+    } finally {
+      rl.close();
+    }
+  };
+}
+
+/**
+ * PRDR-276: the toolchain question, asked inline by `run` on a terminal after
+ * it has printed what a yes would run. Only an explicit yes installs; anything
+ * else — including an empty line — runs nothing, because the default for
+ * changing someone's machine is not changing it.
+ */
+export function makeTtyToolchainApproval(): (message: string) => Promise<boolean> {
+  return async () => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      const answer = (await rl.question("\nInstall now? [y/N] ")).trim().toLowerCase();
+      return answer === "y" || answer === "yes";
+    } finally {
+      rl.close();
+    }
+  };
+}
+
+/**
+ * N-5″ (PRDR-297): the mixed-build question, asked on a terminal after the
+ * presentation has named each build and what it made, and before the approval
+ * question. Asked as a toolchain install is (PRDR-276): only an explicit yes
+ * accepts, because a plan whose parts came from different builds, one of them
+ * possibly an experiment, is not one to approve by default (planning decision 8).
+ */
+export function makeTtyMixedBuilds(): (builds: readonly string[]) => Promise<boolean> {
+  return async () => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      const answer = (await rl.question("\nAccept that the builds above made this plan? [y/N] ")).trim().toLowerCase();
+      return answer === "y" || answer === "yes";
     } finally {
       rl.close();
     }

@@ -4,6 +4,7 @@ import { baseReflogWrites } from "../kernel/git.js";
 import { allTickets } from "../kernel/tickets/readers.js";
 import { stateDir } from "../fs/layout.js";
 import { transitionLineSchema, ledgerRowSchema, type TransitionLine, type LedgerRow } from "../schemas/records.js";
+import { stateVersionRefusal } from "../kernel/migrate.js";
 
 /**
  * T-053 — `detent report`: all eight §14 metrics, computed from artifacts
@@ -155,7 +156,14 @@ function crashResume(root: string, tickets: readonly ReturnType<typeof allTicket
     const lines = readFileSync(journal, "utf8")
       .split("\n")
       .filter((l) => l.trim() !== "")
-      .map((l) => JSON.parse(l) as { stage?: string; event?: string });
+      /* F-3′ (PRDR-137): a torn last line must not take `detent report` with it. */
+    .map((l) => {
+      try {
+        return JSON.parse(l) as { stage?: string; event?: string };
+      } catch {
+        return {};
+      }
+    });
     if (!lines.some((l) => l.event === "skipped_after_crash")) continue;
     crashes += 1;
     const blindStarts = lines.filter((l) => l.stage === "blind_fix" && l.event === "start").length;
@@ -192,6 +200,12 @@ export function renderReport(report: Report): string {
 
 export function main(argv: readonly string[]): number {
   const root = argv[0] ?? process.cwd();
+  /** F-3″ (PRDR-300): this verb does not migrate, so an older or newer state is refused before anything reads it. */
+  const refused = stateVersionRefusal(root);
+  if (refused !== null) {
+    process.stderr.write(`${refused}\n`);
+    return 2;
+  }
   process.stdout.write(renderReport(buildReport(root)));
   return 0;
 }

@@ -65,7 +65,8 @@ describe("T-026 execute before approve (V-1, P4)", () => {
     };
     await bindSlot("test", discover(root).candidates, { root, runner, now: NOW });
     expect(seen!.command).toBe("npm run test -- --run");
-    expect(seen!.env).toEqual({ CI: "1" });
+    /* PRDR-232: the probe runs under the same suppression every gate does. */
+    expect(seen!.env).toEqual({ CI: "1", npm_config_ignore_scripts: "true" });
   });
 });
 
@@ -242,14 +243,16 @@ describe("T-026 V-2 record", () => {
 describe("T-026 skips and unbound slots (V-1)", () => {
   it("an unbound slot is reported, never invented", async () => {
     const root = tree(pkg({ test: "vitest run" }));
-    const report = await bindAll(discover(root), { root, runner: async (s) => okResult(s.command), now: NOW });
+    const report = await bindAll(discover(root), { root, runner: async (s) => okResult(s.command), now: NOW , redact: (t) => t });
     expect(report.unbound).toContain("e2e");
     expect(report.bindings.map((b) => b.slot)).toEqual(["test"]);
   });
 
   it("a skip records who acknowledged it and when", () => {
     const skip = acknowledgeSkip("e2e", "alice", NOW());
-    expect(skip).toEqual({ slot: "e2e", acknowledged_by: "alice", at: NOW() });
+    expect(skip).toEqual({ package: ".", slot: "e2e", acknowledged_by: "alice", at: NOW() });
+    /* V-5′ (PRDR-295): a package's skip names it. */
+    expect(acknowledgeSkip("lint", "alice", NOW(), "web")).toEqual({ package: "web", slot: "lint", acknowledged_by: "alice", at: NOW() });
     expect(() => acknowledgeSkip("e2e", "  ")).toThrow(/must name who/);
   });
 
@@ -258,7 +261,7 @@ describe("T-026 skips and unbound slots (V-1)", () => {
       ...pkg({ test: "vitest run", lint: "eslint ." }),
       Makefile: "test:\n\techo hi\n",
     });
-    const report = await bindAll(discover(root), { root, runner: async (s) => okResult(s.command), now: NOW });
+    const report = await bindAll(discover(root), { root, runner: async (s) => okResult(s.command), now: NOW , redact: (t) => t });
     expect(report.bindings.map((b) => b.slot)).toEqual(["lint"]);
     expect(report.interrupts.map((i) => i.slot)).toEqual(["test"]);
     expect([...report.unbound].sort()).toEqual(["build", "e2e", "test_single", "typecheck"]);
@@ -287,3 +290,42 @@ function okResult(command: string) {
     durationMs: 1,
   };
 }
+
+/**
+ * V-1‴ (PRDR-155) — a bound gate that verifies nothing.
+ *
+ * `bindSlot` refuses a command that will not terminate and one that cannot
+ * execute. A command that exits 0 having done nothing is neither, so
+ * `"test": "echo no tests here"` binds as an approved gate and passes for the
+ * life of the project — making P2's "only exit codes count" vacuous. V-1″
+ * closed the adjacent case of NO bound gate; this is the same hole one step in.
+ */
+describe("V-1‴ a gate that runs cleanly and verifies nothing is flagged, not refused", () => {
+  function repoWith(scripts: Record<string, string>): string {
+    const root = tmpTree({ "package.json": JSON.stringify({ name: "vac", scripts }, null, 2) });
+    trees.push(root);
+    return root;
+  }
+
+  it("flags a script whose every statement is a no-op, and quotes it back", async () => {
+    const root = repoWith({ test: "echo 'no tests here'" });
+    const report = await bindAll(discover(root), { root, timeoutMs: 20_000 , redact: (t) => t });
+    /* Still BOUND — this is evidence, never a refusal. */
+    expect(report.bindings.map((b) => b.slot)).toContain("test");
+    expect(report.notices.join("\n")).toContain("exits 0 having done nothing");
+    expect(report.notices.join("\n"), "the operator needs the command named to judge in one second").toContain("no tests here");
+  });
+
+  /**
+   * PRDR-156: this is the case the duration heuristic got backwards. A real
+   * command that finishes instantly is the NORM — a warm no-op `make` is 12 ms
+   * — and the 500 ms cut accused all four gates of an ordinary project. The
+   * test that used to stand here burned a 900 ms busy-wait to buy its pass.
+   */
+  it("says nothing about a real command, however fast it returns", async () => {
+    const root = repoWith({ test: "node -e \"if (1 + 1 !== 2) process.exit(1)\"" });
+    const report = await bindAll(discover(root), { root, timeoutMs: 20_000 , redact: (t) => t });
+    expect(report.bindings.map((b) => b.slot)).toContain("test");
+    expect(report.notices, "a gate that did work must not be accused").toEqual([]);
+  });
+});

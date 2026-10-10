@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { parseArtifact, type SchemaCheck } from "../../schemas/common.js";
 import { ticketSchema, type Ticket } from "../../schemas/ticket.js";
+import { holdOf, holdReason, readAmendments } from "../amendment-store.js";
 import { claimPath, ticketPath, ticketsDir } from "./paths.js";
 
 /**
@@ -29,7 +30,21 @@ export class TicketInvalidError extends Error {
 export function readTicket(root: string, id: string): Ticket {
   const p = ticketPath(root, id);
   if (!existsSync(p)) throw new TicketNotFoundError(id);
-  return unwrap(id, parseArtifact(ticketSchema, JSON.parse(readFileSync(p, "utf8"))));
+  /**
+   * F-3′ (PRDR-137): the parse is INSIDE the guard. `JSON.parse` threw a bare
+   * `SyntaxError` before `parseArtifact` ran, so `TicketInvalidError` — which
+   * exists to name the file — was never constructed. `allTickets` maps the whole
+   * directory, so one torn ticket took `ready`, `pool`, `status`, `report` and
+   * `doctor` down together with "Unexpected end of JSON input" and no filename,
+   * and an unattended run died on an unreadable error.
+   */
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(p, "utf8"));
+  } catch (err) {
+    throw new TicketInvalidError(id, `is not readable JSON (${(err as Error).message})`);
+  }
+  return unwrap(id, parseArtifact(ticketSchema, raw));
 }
 
 function unwrap(id: string, result: SchemaCheck<Ticket>): Ticket {
@@ -47,7 +62,17 @@ function unwrap(id: string, result: SchemaCheck<Ticket>): Ticket {
  * record, once for the plan. PRDR-064 asks F-1 to say what a ticket file is
  * rather than leaving readers to maintain an exclusion list.
  */
-const NON_TICKET_FILES: ReadonlySet<string> = new Set(["approval.json", "plan.json"]);
+/** PRDR-153: the one definition. `planHash` and `run` each had their own, and both were wrong. */
+/**
+ * PRDR-255 grew it a third time, for C-7's persisted presentation — and the
+ * doc-block above predicted exactly how: a new artifact in `plan/` is a ticket
+ * until this list says otherwise, so `allTickets` parsed `presentation.json`
+ * and `run` exited 1 with a schema error naming `presentation`, `plan_hash` and
+ * `blocking` as unrecognized ticket keys. Being ONE list is what made that a
+ * one-line fix instead of the three-site hunt PRDR-153 describes; F-1 still
+ * owes the positive definition PRDR-064 asked for.
+ */
+export const NON_TICKET_FILES: ReadonlySet<string> = new Set(["approval.json", "plan.json", "presentation.json"]);
 
 export function allTickets(root: string): Ticket[] {
   const dir = ticketsDir(root);
@@ -68,16 +93,23 @@ export function isClaimed(root: string, id: string): boolean {
  * C-4's greenfield bootstrap falls out of this rather than needing a special
  * case — ticket #1 is simply listed as a blocker on every other ticket, so
  * nothing is claimable until it reaches DONE.
+ *
+ * X-4⁸ (PRDR-286): a READY ticket whose requirement ids an amendment names is
+ * held as a blocked one is. The run goes on with the rest, and the hold is a
+ * filter, not a state: the ticket never left READY, so nothing returns it.
  */
 export function ready(root: string): Ticket[] {
   const tickets = allTickets(root);
   const byId = new Map(tickets.map((t) => [t.id, t]));
+  const amendments = readAmendments(root);
   return tickets.filter(
     (t) =>
       t.state === "READY" &&
       !isClaimed(root, t.id) &&
       /* X-4′: discovered dependencies hold a ticket exactly as declared ones do. */
-      [...t.blockers, ...t.waits_on].every((b) => byId.get(b)?.state === "DONE"),
+      [...t.blockers, ...t.waits_on].every((b) => byId.get(b)?.state === "DONE") &&
+      /* X-4⁸ (PRDR-286): and so does an amendment to one of its requirements, until the re-plan it ends in. */
+      holdOf(amendments, t) === null,
   );
 }
 
@@ -98,6 +130,8 @@ export function claimRefusal(root: string, id: string): string {
   if (isClaimed(root, id)) return `claimed by another worker`;
   const unmet = [...ticket.blockers, ...ticket.waits_on].filter((dep) => tickets.find((t) => t.id === dep)?.state !== "DONE");
   if (unmet.length > 0) return `blocked on ${unmet.join(", ")} (state ${ticket.state})`;
+  const hold = ticket.state === "READY" ? holdOf(readAmendments(root), ticket) : null;
+  if (hold !== null) return holdReason(hold);
   return `not claimable from state ${ticket.state}`;
 }
 

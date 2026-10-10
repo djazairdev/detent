@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   READ_ONLY_STAGES,
+  SPAWN_TOOLS,
   guardToolUse,
   matchAny,
+  realpathNearest,
   researchTools,
   stopGate,
   toolsForRole,
@@ -24,6 +29,73 @@ const POLICY: GuardPolicy = {
 };
 
 const edit = (file: string) => guardToolUse("Edit", { file_path: file }, POLICY);
+
+/**
+ * S-2⁗ (PRDR-127) — containment is judged on where a path LANDS.
+ *
+ * These stay hermetic by injecting the resolver, which is why it is a parameter
+ * at all: `guardToolUse` was pure, and that purity is what lets the seven oracle
+ * hook ports run with no session and no filesystem. The escapes themselves are
+ * proved against real links on disk in the SEC pack.
+ */
+describe("S-2⁗ the resolved destination is what is judged (PRDR-127)", () => {
+  it("uses the injected resolver: a path that RESOLVES outside the worktree is denied", () => {
+    const escaping = (p: string): string => (p.startsWith("/wt/src/link") ? p.replace("/wt/src/link", "/elsewhere") : p);
+    const decision = guardToolUse("Write", { file_path: "/wt/src/link/a.ts" }, POLICY, escaping);
+    expect(decision.decision).toBe("deny");
+    expect(decision.reason).toContain("resolves through a symbolic link");
+    /* Same call, nothing resolved: the lexical path is inside the surface. */
+    expect(guardToolUse("Write", { file_path: "/wt/src/link/a.ts" }, POLICY, (p) => p).decision).toBe("allow");
+  });
+
+  it("a link that lands on a PROTECTED path is denied, and the reason names both paths", () => {
+    const toProtected = (p: string): string => (p === "/wt/src/cfg" ? "/wt/AGENTS.md" : p);
+    const decision = guardToolUse("Write", { file_path: "/wt/src/cfg" }, POLICY, toProtected);
+    expect(decision.decision).toBe("deny");
+    expect(decision.reason).toContain("AGENTS.md is protected");
+    expect(decision.reason).toContain("reached through a symbolic link from src/cfg");
+  });
+
+  it("a resolver that throws denies — containment that cannot be established has not passed", () => {
+    const broken = (): string => {
+      throw new Error("EIO");
+    };
+    const decision = guardToolUse("Write", { file_path: "/wt/src/a.ts" }, POLICY, broken);
+    expect(decision.decision).toBe("deny");
+    expect(decision.reason).toContain("containment cannot be established");
+  });
+
+  it("resolution is invisible when nothing is a link — every decision above is unchanged", () => {
+    expect(guardToolUse("Edit", { file_path: "/wt/src/calc.py" }, POLICY, (p) => p).decision).toBe("allow");
+    expect(guardToolUse("Edit", { file_path: "/wt/AGENTS.md" }, POLICY, (p) => p).decision).toBe("deny");
+    expect(guardToolUse("Edit", { file_path: "/etc/hosts" }, POLICY, (p) => p).decision).toBe("deny");
+  });
+
+  it("realpathNearest falls back to the lexical path when no ancestor exists — the fictional root above still works", () => {
+    expect(realpathNearest("/wt/.detent/state/plan-draft.json")).toBe("/wt/.detent/state/plan-draft.json");
+  });
+
+  /**
+   * PRDR-131a: this assertion used to be `realpathNearest("/tmp")` against
+   * `realpathNearest("/private/tmp")`, which holds only where `/tmp` IS a link —
+   * macOS. On Linux, where CI runs, `/tmp` resolves to itself and `/private`
+   * does not exist, so the two differ and the assertion failed. The property
+   * worth asserting is that a link and its target resolve alike; building the
+   * link makes that true everywhere instead of true where it was written.
+   */
+  it("realpathNearest follows a link to its target — asserted on a link the test builds, not on the host's /tmp layout", () => {
+    const base = mkdtempSync(path.join(tmpdir(), "detent-rp-"));
+    try {
+      mkdirSync(path.join(base, "target"));
+      symlinkSync(path.join(base, "target"), path.join(base, "link"));
+      expect(realpathNearest(path.join(base, "link", "file.txt"))).toBe(realpathNearest(path.join(base, "target", "file.txt")));
+      /* And the link resolves to the target rather than to itself. */
+      expect(realpathNearest(path.join(base, "link"))).toBe(realpathNearest(path.join(base, "target")));
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("T-046 PreToolUse guard (oracle test_hooks ports)", () => {
   it("test_allows_in_surface", () => {
@@ -54,18 +126,27 @@ describe("T-046 PreToolUse guard (oracle test_hooks ports)", () => {
     expect(guardToolUse("Read", { file_path: "../secrets.txt" }, POLICY).decision).toBe("deny");
   });
 
-  it("a tool call naming no path is allowed — the kernel re-verifies regardless (P2)", () => {
-    expect(guardToolUse("Bash", {}, POLICY).decision).toBe("allow");
-    expect(guardToolUse("Write", null, POLICY).decision).toBe("allow");
-    expect(guardToolUse("Bash", { command: "git status" }, POLICY).decision).toBe("allow");
+  it("a tool call naming no path ABSTAINS — the allowlist decides, and an `allow` here overrode it (S-2‴)", () => {
+    /**
+     * S-2‴ (PRDR-122): these ABSTAIN rather than allow. A hook decision of
+     * `allow` is terminal in the SDK's permission order, so answering it for a
+     * pathless call overrode `allowedTools` — and `implement` is granted only
+     * `Bash(git add:*)` and `Bash(git commit:*)`, while every other bash
+     * command was being permitted by this very line.
+     */
+    expect(guardToolUse("Bash", {}, POLICY).decision).toBe("abstain");
+    expect(guardToolUse("Write", null, POLICY).decision).toBe("abstain");
+    expect(guardToolUse("Bash", { command: "git status" }, POLICY).decision).toBe("abstain");
+    /** An MCP tool the guard does not govern is likewise the allowlist's call, not a grant. */
+    expect(guardToolUse("mcp__serena__replace_symbol_body", { relative_path: "src/a.ts" }, POLICY).decision).toBe("abstain");
   });
 
   it("S-2″ (PRDR-068): reads are worktree-bounded, not surface-bounded — a session can read its spec", () => {
     /** T-140's empty-diff lesson: a worker denied READING the PRD cannot implement it. */
-    expect(guardToolUse("Read", { file_path: "/wt/detent-prd-v3.md" }, POLICY).decision).toBe("allow");
-    expect(guardToolUse("Grep", { path: "/wt/README.md" }, POLICY).decision).toBe("allow");
+    expect(guardToolUse("Read", { file_path: "/wt/detent-prd-v3.md" }, POLICY).decision).toBe("abstain");
+    expect(guardToolUse("Grep", { path: "/wt/README.md" }, POLICY).decision).toBe("abstain");
     /** SEC-3 is immutability, not unreadability. */
-    expect(guardToolUse("Read", { file_path: "/wt/AGENTS.md" }, POLICY).decision).toBe("allow");
+    expect(guardToolUse("Read", { file_path: "/wt/AGENTS.md" }, POLICY).decision).toBe("abstain");
     /** P7: the worktree bounds every tool, reads included. */
     expect(guardToolUse("Read", { file_path: "/etc/hosts" }, POLICY).decision).toBe("deny");
   });
@@ -134,5 +215,153 @@ describe("T-046 tool surfaces (S-3, oracle test_research_session_gets_domain_sco
      * granted can shadow the deny (D-21's whole point).
      */
     expect(edit("/wt/AGENTS.md").decision).toBe("deny");
+  });
+});
+
+describe("S-1″ (PRDR-124): an init session's surface is its artifact, so its one write rule is real", () => {
+  const initPolicy = {
+    surface: [".detent/state/plan-draft.json"],
+    protectedGlobs: [".detent/plan/**", ".detent/config.json", ".detent/bindings.json"],
+    workRoot: "/wt",
+  };
+
+  it("the artifact is writable and nothing else in the repo is", () => {
+    expect(guardToolUse("Write", { file_path: "/wt/.detent/state/plan-draft.json" }, initPolicy).decision).toBe("allow");
+    /** The exact escape observed live: the draft written as parts beside the artifact. */
+    const part = guardToolUse("Write", { file_path: "/wt/.detent/state/plan/s01-part1.json" }, initPolicy);
+    expect(part.decision).toBe("deny");
+    expect(part.reason).toContain("outside this ticket's declared surface");
+    expect(guardToolUse("Write", { file_path: "/wt/src/anything.ts" }, initPolicy).decision).toBe("deny");
+    expect(guardToolUse("Edit", { file_path: "/wt/detent-prd-v3.md" }, initPolicy).decision).toBe("deny");
+  });
+
+  it("reading is untouched — the surface governs writes alone", () => {
+    /** A planner that cannot read the documents cannot analyse them (T-140's lesson). */
+    expect(guardToolUse("Read", { file_path: "/wt/detent-prd-v3.md" }, initPolicy).decision).toBe("abstain");
+    expect(guardToolUse("Grep", { path: "/wt/src" }, initPolicy).decision).toBe("abstain");
+    /** The worktree bound still holds for reads. */
+    expect(guardToolUse("Read", { file_path: "/etc/hosts" }, initPolicy).decision).toBe("deny");
+  });
+});
+
+/**
+ * S-3⁵ (PRDR-213) — `git rm` is the third verb, judged per pathspec like a write.
+ *
+ * Nothing a write session had removed a file: Write and Edit create and change,
+ * and its Bash was `git add` and `git commit`. gate-313's bootstrap spent all
+ * three review-fix attempts on a staged probe file no session could delete, and
+ * the third committed it by accident. The verb is granted here and judged
+ * exactly where a Write to the same path is judged — one plain path per token,
+ * and a command the guard cannot read is DENIED, never left to the allowlist.
+ */
+describe("S-3⁵ (PRDR-213): `git rm` is the third verb, judged per pathspec like a write", () => {
+  const bash = (command: string) => guardToolUse("Bash", { command }, POLICY);
+
+  it("the write roles have three verbs; the read-only roles still have none", () => {
+    for (const role of ["implement", "blind_fix", "informed_fix", "review_fix"]) {
+      expect(toolsForRole(role), role).toContain("Bash(git rm:*)");
+    }
+    for (const role of ["review", "diagnose", "research", "planner"]) {
+      expect(toolsForRole(role), role).not.toContain("Bash(git rm:*)");
+    }
+  });
+
+  it("a plain path inside the surface is allowed; -f, -q, --cached and -- are read", () => {
+    expect(bash("git rm -f src/calc.py").decision).toBe("allow");
+    expect(bash("git rm --cached -q -- src/calc.py src/other.py").decision).toBe("allow");
+    expect(bash("git rm -f /wt/src/calc.py").decision).toBe("allow");
+  });
+
+  it("outside the surface, on a protected path, or outside the worktree: the Write's own verdict", () => {
+    const readme = bash("git rm -f README.md");
+    expect(readme.decision).toBe("deny");
+    expect(readme.reason).toContain("outside this ticket's declared surface");
+    expect(bash("git rm -f AGENTS.md").reason).toContain("protected");
+    expect(bash("git rm -f ../secrets.txt").reason).toContain("outside the worktree");
+    /* One denied path denies the call: a foreign path cannot ride behind an owned one. */
+    expect(bash("git rm -f src/calc.py README.md").decision).toBe("deny");
+  });
+
+  it("what the guard cannot read is DENIED, never abstained: -r, globs, magic, no pathspec, shell syntax", () => {
+    const unreadable = [
+      "git rm -r src",
+      "git rm -f 'src/*.py'",
+      "git rm -f src/*.py",
+      "git rm -f :/src/calc.py",
+      "git rm -f",
+      "git rm",
+      "git rm -f src/calc.py && rm -rf /",
+      "git rm -f src/calc.py; ls",
+      "git rm -f src/calc.py\nrm x",
+      "git rm --dry-run src/calc.py",
+      "git rm -f $(echo src/calc.py)",
+      "git rm -f src/calc.py > /dev/null",
+    ];
+    for (const command of unreadable) {
+      const decision = bash(command);
+      expect(decision.decision, command).toBe("deny");
+      expect(decision.reason, command).toContain("cannot read");
+    }
+  });
+
+  it("every other bash call still abstains — the allowlist decides (S-2‴)", () => {
+    expect(bash("git add src/calc.py").decision).toBe("abstain");
+    expect(bash("git commit -m x").decision).toBe("abstain");
+    expect(bash("rm -rf src").decision).toBe("abstain");
+    expect(bash("git rmx src/calc.py").decision).toBe("abstain");
+  });
+});
+
+/**
+ * Audit of PRDR-213, cold re-read of the reading: two commands the allowlist's
+ * prefix rule would have passed were "not a git rm" to the guard and abstained.
+ */
+describe("audit of PRDR-213: what the prefix rule reads past, the guard reads too", () => {
+  const bash = (command: string) => guardToolUse("Bash", { command }, POLICY);
+
+  it("leading whitespace is still the whole command — judged, not abstained", () => {
+    expect(bash("  git rm -f AGENTS.md").reason).toContain("protected");
+    expect(bash("\tgit rm -f src/calc.py").decision).toBe("allow");
+  });
+
+  it("a brace group, an OR chain and a CRLF split are compound — denied as unreadable", () => {
+    for (const command of ["{ git rm -f src/calc.py; }", "git add x || git rm -f src/calc.py", "git rm -f src/calc.py \r\n rm x"]) {
+      const decision = bash(command);
+      expect(decision.decision, command).toBe("deny");
+      expect(decision.reason, command).toContain("cannot read");
+    }
+  });
+});
+
+/**
+ * D-28″ (PRDR-215) — a spawn is refused by the hook, for every role, under
+ * both drivers. The denial existed as a list the plugin driver's policy file
+ * carried; the headless hook abstained, because a spawn names no path, and the
+ * platform grants `Agent` without consulting `allowedTools`. gate-313's
+ * review-fix sessions #2 and #3 each ran a general-purpose sub-agent — twenty
+ * assistant messages, a dozen tool calls, about 420k input tokens — outside the
+ * turn ceiling and outside anything the ledger can attribute.
+ */
+describe("D-28″ (PRDR-215): a billable spawn is denied before the path judgement, for every role", () => {
+  it("the list is the one the plugin driver already published", () => {
+    expect([...SPAWN_TOOLS]).toEqual(["Task", "Agent", "TaskCreate"]);
+  });
+
+  it("Task, Agent and TaskCreate are denied with D-28's reason under a write policy", () => {
+    for (const tool of SPAWN_TOOLS) {
+      const decision = guardToolUse(tool, { prompt: "delete two files", subagent_type: "general-purpose" }, POLICY);
+      expect(decision.decision, tool).toBe("deny");
+      expect(decision.reason, tool).toContain("D-28");
+    }
+  });
+
+  it("and under a read-only role's artifact policy — the role does not matter", () => {
+    const readOnly: GuardPolicy = { ...POLICY, surface: [], artifactRoot: "/wt/.detent/runs/t1" };
+    expect(guardToolUse("Agent", { prompt: "x" }, readOnly).decision).toBe("deny");
+  });
+
+  it("reads and controls of tasks spawn nothing and stay the allowlist's", () => {
+    expect(guardToolUse("TaskOutput", { task_id: "1" }, POLICY).decision).toBe("abstain");
+    expect(guardToolUse("TaskStop", { task_id: "1" }, POLICY).decision).toBe("abstain");
   });
 });

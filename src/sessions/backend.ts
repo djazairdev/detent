@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
-import type { RoleId } from "../schemas/roles.js";
+import type { CacheLifetime } from "../schemas/cache-lifetime.js";
+import type { PromptId, RoleId } from "../schemas/roles.js";
 import type { GuardPolicy } from "./guard.js";
+import type { ScratchGrant } from "./sandbox.js";
 
 /**
  * T-040 — the SessionBackend seam (ARCH-1, D-19).
@@ -22,15 +24,47 @@ export interface SessionSpec {
   readonly promptPrefix: string;
   /** Per-ticket variable suffix. */
   readonly promptVariable: string;
+  /**
+   * S-6‴: the session's system prompt, where its kind shares one; absent, the
+   * SDK's own, which is empty. A system prompt is cached as a block of its
+   * own, so each session given the same one reads it from the cache once the
+   * first has written it. A shared start of the first message is not: Claude
+   * Code sets its breakpoint at the message's end, and on 2.1.285 a second
+   * session whose first 30K tokens matched the first's read none of them from
+   * the cache, where one given them as its system prompt read 29,281.
+   */
+  readonly systemPrompt?: string;
   readonly cwd: string;
   /** Where the session writes its artifact. Artifacts are the interface (P2). */
   readonly artifactOut: string;
-  /** Advisory until T-046 wires real enforcement (S-2/S-3). */
+  /** What the session may use without asking: its role's tools and rules (S-1), enforced beside the D-21 hook. */
   readonly allowedTools: readonly string[];
-  /** S-1: `"plan"` for the read-only roles, empty otherwise. */
+  /**
+   * C-4⁵ (PRDR-292): the built-in tools the session has at all. `allowedTools`
+   * grants without asking and removes nothing: in the default mode the platform
+   * grants read-only Bash whatever it names, and planner sessions ran it 2,846
+   * times in the planning audit. S-1⁵ (PRDR-302): absent, the SDK backend
+   * derives it from `allowedTools` (`builtinTools`), so every session has the
+   * built-in tools its role names and no others; a spec names its own only
+   * where its role's set is fixed by name, as the planning roles' is.
+   */
+  readonly tools?: readonly string[];
+  /** S-1′: `"plan"` for an artifact-less session (doctor's smoke), empty otherwise: a read-only role writes its artifact. */
   readonly permissionMode: "" | "plan";
   /** Model routing per role; empty means the backend's default. */
   readonly model: string;
+  /**
+   * PRDR-197: the effort this role is routed to, or absent for the runtime's
+   * own default. Absent means the options are what they were before the knob
+   * existed — that invisibility is the point of the default.
+   */
+  readonly effort?: string;
+  /**
+   * S-6″ (PRDR-320): the prompt cache's lifetime for this kind of session,
+   * which the backend sets in the session's environment. Absent is one hour,
+   * as S-6 gave every session.
+   */
+  readonly cacheTtl?: CacheLifetime;
   /**
    * X-1″ (PRDR-106): no ceiling by default. The referee and init never set
    * one; the doctor probe bounds itself to a single turn, and that is the
@@ -47,6 +81,29 @@ export interface SessionSpec {
    * reached the hook.
    */
   readonly policy?: GuardPolicy;
+  /**
+   * S-3⁸ (PRDR-121): MCP servers this session may call, by name. Only ever the
+   * optional symbol-intelligence server, and only its READ tools — the
+   * allowlist is what grants them, and `assertNoEditingTools` refuses any tool
+   * that would write outside the D-21 hook's sight.
+   */
+  readonly mcpServers?: Readonly<Record<string, unknown>>;
+  /**
+   * S-1⁗ (PRDR-285): a VALIDATE reviewer's scratch directory, and the
+   * interpreters the sandbox offers there. Present, the backend serves the
+   * session one more tool beside any server above, the one that runs a script
+   * in that directory, sandboxed (`SCRATCH_TOOL`). Only a `spec_review`
+   * session ever carries it: `src/init/session.ts` refuses it to every other
+   * role, and the referee's session arm never sets it.
+   */
+  readonly scratch?: ScratchGrant;
+  /**
+   * X-8″ (PRDR-321): carry on this session's own conversation, which a usage
+   * limit stopped, instead of starting the task over. The backend resumes it
+   * with a short prompt to carry on, and launches the spec afresh when the
+   * runtime will not resume it, saying so in `SessionResult.resume`.
+   */
+  readonly resume?: { readonly sessionId: string };
 }
 
 /**
@@ -75,7 +132,7 @@ export function prefixHash(spec: SessionSpec): string {
  * client-side estimate, named accordingly (PRDR-052). `telemetryParsed: false`
  * is the S-4 circuit breaker — the kernel treats it as budget-breaching.
  */
-interface ModelTokenUsage {
+export interface ModelTokenUsage {
   readonly inputTokens: number;
   readonly outputTokens: number;
   readonly cacheReadInputTokens: number;
@@ -105,12 +162,53 @@ export interface SessionResult {
    * ceiling, both of which the cumulative fields exclude.
    */
   readonly perModel?: Readonly<Record<string, ModelTokenUsage>>;
+  /**
+   * PRDR-114: the routed model was unavailable on this runtime and the
+   * session ran on the runtime default instead. `requested` is what the
+   * config asked for; `models` on the ledger row says what actually ran.
+   */
+  readonly modelFallback?: { readonly requested: string; readonly reason: string };
+  /**
+   * PRDR-237: the effort the turns actually ran at, as the containment hook saw
+   * it — the SDK's level AFTER any silent downgrade. Absent is UNOBSERVED,
+   * never "it matched what was routed", and has THREE causes, not the two this
+   * block used to name: a model without effort support, a session that called
+   * no tool, and a session that DID report a level and then died on the wire —
+   * the crash path composes its result before the observed level is attached,
+   * so S-4′'s shape and "no effort support" are indistinguishable here.
+   */
+  readonly effort?: string;
+  /**
+   * S-3‴ (PRDR-123): configured MCP servers this session did NOT get. Absent
+   * means the session reported nothing either way — never read as success.
+   */
+  readonly mcpFailures?: readonly { readonly name: string; readonly status: string }[];
+  /** S-6″ (PRDR-320): the cache lifetime the session ran with. Absent where the backend sets none, as the mock's. */
+  readonly cacheTtl?: CacheLifetime;
+  /**
+   * S-6″ (PRDR-320): what the session wrote to the cache at each lifetime,
+   * summed from the usage its responses carried, each response once. Absent
+   * where the backend reports no stream.
+   */
+  readonly cacheWrites?: Readonly<Record<CacheLifetime, number>>;
+  /** X-8″ (PRDR-321): the runtime's id for the session's conversation, which a later spec may resume; absent where none arrived. */
+  readonly sessionId?: string;
+  /**
+   * X-8″ (PRDR-321): what came of a spec's `resume`: the conversation it
+   * named, and `refused`, the runtime's reason, when it would not resume it
+   * and the session was launched afresh instead.
+   */
+  readonly resume?: { readonly sessionId: string; readonly refused?: string };
 }
 
 export interface SessionBackend {
   readonly name: string;
   run(spec: SessionSpec): Promise<SessionResult>;
-  /** S-5: bootstrap fails when installed != pinned. The mock is version-free. */
+  /**
+   * S-5: bootstrap fails when installed != pinned — an equality on the version
+   * TOKEN both halves parse the same way (PRDR-260), not on the CLI's whole
+   * banner. The mock is version-free.
+   */
   checkVersion(pinned: string): Promise<void>;
 }
 
@@ -121,9 +219,10 @@ export interface SessionBackend {
  * zone permits the kernel only this module.
  */
 export interface PromptSet {
-  readonly prompts: Readonly<Record<RoleId, string>>;
-  /** sha256 hex per role, matching prompts/manifest.json. */
-  readonly hashes: Readonly<Record<RoleId, string>>;
+  /** C-4⁵ (PRDR-292): by prompt, where the planner has one for each job it does. */
+  readonly prompts: Readonly<Record<PromptId, string>>;
+  /** sha256 hex per prompt, matching prompts/manifest.json. */
+  readonly hashes: Readonly<Record<PromptId, string>>;
 }
 
 /**
@@ -137,4 +236,28 @@ export function stablePrefix(rolePrompt: string, rulesText: string, bindingsPrea
     `== RULES ==\n${rulesText.trim()}`,
     `== VERIFICATION BINDINGS ==\n${bindingsPreamble.trim()}`,
   ].join("\n\n");
+}
+
+/**
+ * The prefix's third part: what every run session is told about the gates.
+ * V-5′ (PRDR-295): the root's by slot, as before packages, and each other
+ * package's under `packages`, only where there is one, so a project with one
+ * package keeps a byte-identical prefix (S-6).
+ */
+export function bindingsPreamble(
+  bindings: readonly { readonly package: string; readonly slot: string; readonly resolved: string }[],
+  protectedGlobs: readonly string[],
+): string {
+  const bySlot = (pkg: string): Record<string, string> => Object.fromEntries(bindings.filter((b) => b.package === pkg).map((b) => [b.slot, b.resolved]));
+  const others = [...new Set(bindings.map((b) => b.package).filter((pkg) => pkg !== "."))];
+  return JSON.stringify(
+    {
+      bindings: bySlot("."),
+      ...(others.length === 0 ? {} : { packages: Object.fromEntries(others.map((pkg) => [pkg, bySlot(pkg)])) }),
+      protected: protectedGlobs,
+      non_negotiables: "Only artifacts and exit codes count (P2).",
+    },
+    null,
+    2,
+  );
 }

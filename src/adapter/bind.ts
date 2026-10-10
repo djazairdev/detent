@@ -3,6 +3,7 @@ import { SCHEMA_VERSION } from "../schemas/common.js";
 import { plausible, type Candidate, type Discovery, type StackFacts } from "./discover/types.js";
 import { normalizeInvocation, type Invocation } from "./normalize.js";
 import { GATE_SLOTS, looksLikeWatchMode, runGate, runnable, type GateResult, type GateSlot } from "./run.js";
+import { gateLabel } from "./packages.js";
 
 /**
  * T-026 — binding execution (V-1, V-2).
@@ -65,11 +66,19 @@ interface BoundOutcome {
   readonly kind: "bound";
   readonly slot: GateSlot;
   readonly binding: Binding;
+  /**
+   * V-1‴ (PRDR-156): the candidate the binding came from. `Binding` carries
+   * `config_hash` but not `config_region`, and the region is the script body
+   * or recipe block — the only place the command's actual TEXT survives.
+   */
+  readonly candidate: Candidate;
   readonly result: GateResult;
 }
 
 export interface ChoiceRequiredOutcome {
   readonly kind: "choice-required";
+  /** V-5′ (PRDR-295): the package the choice is for, `.` for the root. */
+  readonly package: string;
   readonly slot: GateSlot;
   /** Structured, so C-3b's PRESENT summary can render it without re-deriving. */
   readonly candidates: readonly Candidate[];
@@ -77,6 +86,8 @@ export interface ChoiceRequiredOutcome {
 
 interface RejectedOutcome {
   readonly kind: "rejected";
+  /** V-5′ (PRDR-295): the package whose candidate could not be bound. */
+  readonly package: string;
   readonly slot: GateSlot;
   readonly candidate: Candidate;
   readonly reason: RejectReason;
@@ -91,8 +102,9 @@ interface UnboundOutcome {
 
 export type SlotOutcome = BoundOutcome | ChoiceRequiredOutcome | RejectedOutcome | UnboundOutcome;
 
-/** V-1: an unbound slot is a human-acknowledged skip, recorded with who and when. */
+/** V-1: an unbound slot is a human-acknowledged skip, recorded with who and when, per package (V-5′). */
 export interface Skip {
+  readonly package: string;
   readonly slot: GateSlot;
   readonly acknowledged_by: string;
   readonly at: string;
@@ -107,7 +119,10 @@ export type GateRunner = (spec: {
 }) => Promise<GateResult>;
 
 export interface BindOptions {
+  /** The directory the probe runs in: the package's own (V-5′). */
   readonly root: string;
+  /** V-5′ (PRDR-295): the package `root` is, recorded on the binding. The repository's root package by default. */
+  readonly package?: string;
   readonly timeoutMs?: number;
   readonly runner?: GateRunner;
   readonly now?: () => string;
@@ -117,6 +132,22 @@ export interface BindOptions {
   readonly status?: Binding["status"];
   readonly facts?: Pick<StackFacts, "pm">;
   readonly normalize?: (candidate: Candidate, facts?: Pick<StackFacts, "pm">) => Invocation;
+}
+
+/**
+ * `bindAll`'s options. `redact` is REQUIRED and lives here rather than on
+ * `BindOptions` (PRDR-163) because `bindAll` is the only function that
+ * produces notices — `bindSlot` and `resolveChoice` have no use for it.
+ *
+ * It was optional with an identity default, which made the "required"
+ * parameter on `vacuousGateNotices` void at the only entry point production
+ * uses; the comment beside it claimed `src/init/bind.ts` was the sole caller,
+ * and that was false. `src/cli/verify.ts` reaches `bindAll` through its own
+ * `deps.bind` indirection, passed nothing, and produced notices carrying a raw
+ * token. Required means the compiler names every caller.
+ */
+export interface BindAllOptions extends BindOptions {
+  readonly redact: Redact;
 }
 
 const defaultRunner: GateRunner = (spec) =>
@@ -133,8 +164,9 @@ export async function bindSlot(
   opts: BindOptions,
 ): Promise<SlotOutcome> {
   const viable = plausible(candidates, slot);
+  const pkg = opts.package ?? ".";
   if (viable.length === 0) return { kind: "unbound", slot };
-  if (viable.length > 1) return { kind: "choice-required", slot, candidates: viable };
+  if (viable.length > 1) return { kind: "choice-required", package: pkg, slot, candidates: viable };
 
   const candidate = viable[0] as Candidate;
   const normalize = opts.normalize ?? normalizeInvocation;
@@ -152,6 +184,7 @@ export async function bindSlot(
   if (looksLikeWatchMode(result)) {
     return {
       kind: "rejected",
+      package: pkg,
       slot,
       candidate,
       reason: "watch-mode",
@@ -165,6 +198,7 @@ export async function bindSlot(
   if (!runnable(result)) {
     return {
       kind: "rejected",
+      package: pkg,
       slot,
       candidate,
       reason: "unrunnable",
@@ -178,6 +212,7 @@ export async function bindSlot(
   if (toolingAbsent(result, invocation.command)) {
     return {
       kind: "rejected",
+      package: pkg,
       slot,
       candidate,
       reason: "unrunnable",
@@ -196,8 +231,10 @@ export async function bindSlot(
   return {
     kind: "bound",
     slot,
+    candidate,
     binding: bindingSchema.parse({
       schema_version: SCHEMA_VERSION,
+      package: pkg,
       slot,
       adapter: candidate.adapter,
       ref: candidate.ref,
@@ -213,35 +250,199 @@ export async function bindSlot(
 }
 
 export interface BindReport {
-  readonly outcomes: readonly SlotOutcome[];
   readonly bindings: readonly Binding[];
   /** Outcomes a human must resolve: C-3b's two interrupt conditions. */
   readonly interrupts: readonly (ChoiceRequiredOutcome | RejectedOutcome)[];
   readonly unbound: readonly GateSlot[];
+  /** V-1‴ (PRDR-155): bound gates that may verify nothing. Evidence, never a refusal. */
+  readonly notices: readonly string[];
 }
 
-export async function bindAll(discovery: Discovery, opts: BindOptions): Promise<BindReport> {
+/**
+ * V-1‴ (PRDR-155) — a gate that runs cleanly and verifies nothing.
+ *
+ * `bindSlot` refuses two things: a command that will not terminate (watch mode)
+ * and one that cannot execute. A command that exits 0 having done nothing is
+ * neither, so it binds — and `"test": "echo no tests here"` becomes an approved
+ * gate that passes for the life of the project. P2 says only exit codes count;
+ * a gate that always exits 0 makes P2 vacuous. V-1″ closed the adjacent case of
+ * NO bound gate; this is the same hole one step in.
+ *
+ * Evidence and not a refusal, deliberately. A fast silent zero-exit command is
+ * ambiguous — `go build ./...` on a small module is exactly that, and so is a
+ * lint gate on a clean tree — so refusing it would make `init` unusable on the
+ * projects it should serve. The decisive test is breaking the tree and
+ * requiring the gate to go red, which is what V-6 does at REVIEW time, where a
+ * diff already exists to revert; there is none at bind time. So this measures,
+ * records, and hands it to the human, who settles it in a second.
+ */
+/**
+ * PRDR-156: the signal is the command's TEXT, not how long it took.
+ *
+ * Duration was tried first and does not discriminate. A vacuous `echo` probes
+ * in 96 ms of which ~94 ms is npm's own startup, while a warm no-op `make` is
+ * 12 ms and legitimate — the populations overlap, and the 500 ms cut flagged
+ * all four gates of an ordinary small project, including the 344 ms script the
+ * rule's own evidence called real work. A warning that fires on every slot
+ * every time is one nobody reads.
+ *
+ * `config_region` is "the smallest canonical text that determines `resolved`",
+ * so the node engine holds `scripts.test=echo no tests here` and make and just
+ * hold the recipe block. That text is decidable where a stopwatch is not.
+ *
+ * Narrow on purpose. `jest --passWithNoTests`, or a suite with no assertions,
+ * is not visible here and is not meant to be — V-6 catches those at review
+ * time, where a diff exists to revert. A miss leaves the status quo standing;
+ * a false accusation on every gate would be a new harm.
+ */
+
+/**
+ * Which adapters put an executable COMMAND in `config_region`, and in what shape.
+ *
+ * PRDR-161: a whitelist, because the first version was a blacklist of the
+ * shapes its author had thought of. `config_region` is "the smallest canonical
+ * text that determines `resolved`" — which for `pyproject` is a TOML TABLE and
+ * for `workspace:*` is a marker string, neither of which is shell. Sniffing
+ * the text for a recipe header would work today and break on the next engine;
+ * the adapter's own name is the fact, and `BoundOutcome` carries it.
+ *
+ * The others are `exists:<file>` (go, cargo, tsc, and pyproject's fallback) —
+ * the command follows from a real tool, never from a body someone wrote — plus
+ * `pyproject`'s TOML tables and `workspace:*`'s marker strings, which are not
+ * commands at all.
+ *
+ * PRDR-165 records the one uncomfortable exclusion: `workspace:*` names
+ * `npm run test --workspaces --if-present`, which `discover/index.ts` itself
+ * describes as exiting 0 having run NOTHING when no package carries the
+ * script — "the 'greened on nothing' class V-1″ closed once already". That
+ * orchestrator form is deliberately not wired into `discover()` today, so
+ * there is no live silence; if it is ever connected, this classifier will be
+ * silent by name on the exact gate class V-1‴ exists for, and the answer is a
+ * check on the orchestrator flag rather than on a shell grammar.
+ */
+const COMMAND_REGION: Readonly<Record<string, "script" | "recipe">> = {
+  "node-scripts": "script",
+  make: "recipe",
+  just: "recipe",
+};
+
+/** The executable half of a `config_region`, or null when this adapter has none. */
+function commandBody(candidate: Candidate): string | null {
+  /**
+   * PRDR-165: `Object.hasOwn`, because bracket access consults the prototype
+   * chain. An adapter named `constructor`, `toString`, `valueOf`,
+   * `hasOwnProperty` or `__proto__` returned a non-undefined `shape`, skipped
+   * the guard and took the recipe branch — reproducing the very defect this
+   * whitelist replaced, for eight names nobody enumerated. No engine emits one
+   * today; a whitelist that silently succeeds off-list is not a whitelist.
+   */
+  if (!Object.hasOwn(COMMAND_REGION, candidate.adapter)) return null;
+  const shape = COMMAND_REGION[candidate.adapter];
+  if (shape === undefined) return null;
+  if (shape === "script") {
+    /* `scripts.<name>=<body>`. A workspace-derived candidate reuses no such region, so this fails closed. */
+    const script = /^scripts\.[^=]+=([\s\S]*)$/.exec(candidate.config_region);
+    return script === null ? null : (script[1] ?? "");
+  }
+  /* A make or just recipe block: the first line is the target header, the rest is the recipe. */
+  const lines = candidate.config_region.split("\n");
+  return lines.length > 1 ? lines.slice(1).join("\n") : null;
+}
+
+/** Shell statements that exit 0 having done nothing. */
+const NO_OP = /^(?:echo|printf|true|exit\s+0)\b|^:$/;
+
+/**
+ * True when EVERY statement in the command is a no-op. Splitting is
+ * quote-blind on purpose: over-splitting a real command yields fragments that
+ * are not no-ops, so it can only cause a miss, never a false accusation.
+ */
+export function verifiesNothing(candidate: Candidate): boolean {
+  const body = commandBody(candidate);
+  if (body === null) return false;
+  const statements = body
+    .split(/&&|\|\||;|\n/)
+    .map((part) => part.trim().replace(/^[@-]+/, "").trim())
+    .filter((part) => part !== "" && !part.startsWith("#"));
+  /* An empty script body is the emptiest gate of all. */
+  if (statements.length === 0) return true;
+  return statements.every((part) => NO_OP.test(part));
+}
+
+/**
+ * The redaction the caller supplies. REQUIRED, not defaulted to identity:
+ * this notice quotes a project's own command output, and a default that does
+ * nothing is a default that leaks. N-1 forbids the adapter importing
+ * `kernel/scrub.ts`, so the layer that composes them passes it in — which is
+ * the same shape `runner` and `normalize` already take here.
+ */
+export type Redact = (text: string) => string;
+
+export function vacuousGateNotices(outcomes: readonly SlotOutcome[], redact: Redact): string[] {
+  const notices: string[] = [];
+  for (const outcome of outcomes) {
+    if (outcome.kind !== "bound" || !verifiesNothing(outcome.candidate)) continue;
+    /**
+     * SEC-4: scrubbed BEFORE it can reach a file, a stream or a prompt — the
+     * same rule `referee-gate.ts` applies to gate output it writes. A project
+     * whose test script echoes a token would otherwise put that token into a
+     * phase output verbatim.
+     */
+    const tail = redact(outcome.result.output.trim()).split("\n").slice(-2).join(" / ").slice(0, 120);
+    /**
+     * The COMMAND too, not just its output. Caught by the pipeline-layer test:
+     * a script body is project configuration and can carry a credential —
+     * `curl -H "Authorization: Bearer …"` is an ordinary thing to find in one
+     * — and this notice quotes it back verbatim.
+     */
+    /**
+     * PRDR-161: capped like the output tail — a long recipe should not go to
+     * stdout whole. PRDR-165: with a marker, because the sentence around it
+     * asserts the quoted text IS the command, and a silent truncation can drop
+     * the very statement that made it non-vacuous.
+     */
+    const full = redact(commandBody(outcome.candidate)?.trim() ?? "");
+    const body = full.length > 120 ? `${full.slice(0, 120)}…` : full;
+    notices.push(
+      `${gateLabel(outcome.binding)}: \`${outcome.binding.resolved}\` runs \`${body}\` — every statement in it exits 0 having ` +
+        `done nothing. It printed: ${tail === "" ? "(nothing)" : tail} (${outcome.result.durationMs}ms). ` +
+        "A gate that always passes verifies nothing, and every ticket goes green against it (V-1‴). " +
+        "Evidence, not a refusal — bind a command that can fail, or confirm this is what you meant.",
+    );
+  }
+  return notices;
+}
+
+export async function bindAll(discovery: Discovery, opts: BindAllOptions): Promise<BindReport> {
   const outcomes: SlotOutcome[] = [];
   for (const slot of GATE_SLOTS) {
     outcomes.push(await bindSlot(slot, discovery.candidates, { ...opts, facts: opts.facts ?? { pm: discovery.stack.pm } }));
   }
+  /**
+   * PRDR-165: `outcomes` is gone. It had zero consumers anywhere in `src/`,
+   * `tests/` or `scripts/`, and PRDR-156 widened it to carry the `Candidate` —
+   * raw `config_region`, i.e. script bodies and TOML tables — alongside an
+   * unscrubbed `GateResult.output`. A dead field is harmless; a dead field
+   * that accumulates project text is one `JSON.stringify(report)` from being
+   * an exposure. What callers need is derived below.
+   */
   return {
-    outcomes,
     bindings: outcomes.filter((o): o is BoundOutcome => o.kind === "bound").map((o) => o.binding),
     interrupts: outcomes.filter(
       (o): o is ChoiceRequiredOutcome | RejectedOutcome => o.kind === "choice-required" || o.kind === "rejected",
     ),
     unbound: outcomes.filter((o): o is UnboundOutcome => o.kind === "unbound").map((o) => o.slot),
+    notices: vacuousGateNotices(outcomes, opts.redact),
   };
 }
 
 /** V-1: record who acknowledged the skip and when. Never inferred. */
-export function acknowledgeSkip(slot: GateSlot, acknowledgedBy: string, at = new Date().toISOString()): Skip {
+export function acknowledgeSkip(slot: GateSlot, acknowledgedBy: string, at = new Date().toISOString(), pkg = "."): Skip {
   if (acknowledgedBy.trim() === "") throw new Error("a skip must name who acknowledged it (V-1)");
-  return { slot, acknowledged_by: acknowledgedBy, at };
+  return { package: pkg, slot, acknowledged_by: acknowledgedBy, at };
 }
 
-/** Identity of a candidate, stable across a JSON round trip. */
+/** Identity of a candidate within its package, stable across a JSON round trip. */
 function identity(c: Candidate): string {
   return [c.slot, c.adapter, c.ref, c.resolved, c.config_hash].join("\0");
 }

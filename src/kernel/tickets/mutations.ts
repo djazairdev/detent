@@ -1,10 +1,12 @@
-import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { ticketSchema, type Generation, type Ticket } from "../../schemas/ticket.js";
+import type { ContractConsume, ContractProvide } from "../../schemas/init.js";
 import { SCHEMA_VERSION } from "../../schemas/common.js";
 import { ZERO_COUNTERS } from "../generations.js";
 import { claimPath, claimsDir, ticketPath, ticketsDir } from "./paths.js";
 import { readTicket } from "./readers.js";
+import { scrub, scrubJson } from "../scrub.js";
 
 /**
  * T-017 write side. `src/sessions/**` may not import this module (ARCH-1): a
@@ -19,32 +21,8 @@ export interface ClaimInfo {
   readonly host?: string;
 }
 
-/**
- * PRDR-079: is this claim's holder verifiably gone? A host recorded on the
- * claim that is not THIS host makes pid liveness a lie — never breakable. A
- * legacy claim without a host keeps the single-machine assumption PRDR-078
- * recorded. Shared by `unclaim`, approve/requeue's guard, and the pool's
- * crash-resume self-heal, so every breaker answers identically.
- */
-/**
- * PRDR-079 amendment: EPERM answers "exists". Signal-0 to a process you may
- * not signal (pid 1 on a CI runner) throws EPERM — the process is ALIVE.
- * Treating any throw as death made both breakers see privileged live
- * processes as stale.
- */
-export function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
-export function claimBreakable(info: ClaimInfo, isAlive: (pid: number) => boolean, thisHost: string): boolean {
-  if (info.host !== undefined && info.host !== thisHost) return false;
-  return !isAlive(info.pid);
-}
+/** PRDR-079: claim liveness, shared with the Stop hook's reading of a run's driver (PRDR-099). */
+export { claimBreakable, pidAlive } from "../../fs/hook-files.js";
 
 /**
  * R-3: `openSync(path, "wx")` is POSIX `O_CREAT|O_EXCL` — the same primitive
@@ -52,7 +30,15 @@ export function claimBreakable(info: ClaimInfo, isAlive: (pid: number) => boolea
  * gets EEXIST. The write that follows is not part of the atomic step, so a
  * reader must treat an empty claim file as held-by-someone, not as free.
  */
-export function claim(root: string, id: string, owner: string): boolean {
+/**
+ * X-1⁗ (PRDR-153): `now` is injectable, because the wall-clock check subtracts
+ * this timestamp from `ctx.iso()`. Those were two different clocks — `iso()` is
+ * injected in tests, `at` was always real — so under a frozen fixture clock the
+ * elapsed time came out hugely negative and the check never fired, including
+ * in the canonical X-1 wall-clock test. A subtraction across two clocks is not
+ * a duration.
+ */
+export function claim(root: string, id: string, owner: string, now: () => string = () => new Date().toISOString()): boolean {
   mkdirSync(claimsDir(root), { recursive: true });
   let fd: number;
   try {
@@ -62,7 +48,7 @@ export function claim(root: string, id: string, owner: string): boolean {
     throw err;
   }
   try {
-    const info: ClaimInfo = { owner, pid: process.pid, at: new Date().toISOString(), host: hostname() };
+    const info: ClaimInfo = { owner, pid: process.pid, at: now(), host: hostname() };
     writeFileSync(fd, JSON.stringify(info));
   } finally {
     closeSync(fd);
@@ -83,11 +69,44 @@ export function release(root: string, id: string): void {
   rmSync(claimPath(root, id), { force: true });
 }
 
-/** Validate before write: an invalid ticket never reaches disk. */
+/**
+ * Validate before write: an invalid ticket never reaches disk.
+ *
+ * SEC-4 (PRDR-252): and SCRUB before write, here rather than at the callers.
+ *
+ * PRDR-169 put scrubbing on `appendNote` with the argument that "the next site
+ * that appends session text should inherit it rather than remember it — the
+ * rule this audit chain has now forgotten four times". It forgot a fifth time
+ * three lines away: `quarantineTicket` interpolates a failing gate's raw,
+ * unbounded output into `description` and writes it through THIS function,
+ * which is a different seam. `referee-gate.ts` scrubs that same
+ * `GateResult.output` on its own path — and writes it to `.detent/state/`,
+ * which F-1 marks local. The unscrubbed copy went to `.detent/plan/`, which
+ * `fs/layout.ts` marks `tracking: "committed"` and `stageAll` sweeps with
+ * `git add -A`. The local artifact was protected and the committed one was not.
+ *
+ * So the seam is the write itself, and every field inherits it — `description`,
+ * `title`, `acceptance_criteria`, and whatever field the next ticket adds.
+ * Scrubbed BEFORE validation so the object returned to the caller is the object
+ * on disk: a function that writes a redacted file and hands back the secret has
+ * moved the leak, not closed it. `scrub` only rewrites secret-shaped runs into
+ * `[REDACTED]`, which is a valid string in every field the schema has, and no
+ * ticket key is one the assignment rule matches — so this cannot turn a valid
+ * ticket into one the parse below refuses.
+ */
 export function writeTicket(root: string, ticket: Ticket): Ticket {
-  const validated = ticketSchema.parse(ticket);
+  const validated = ticketSchema.parse(scrubJson(ticket));
   mkdirSync(ticketsDir(root), { recursive: true });
-  writeFileSync(ticketPath(root, validated.id), `${JSON.stringify(validated, null, 2)}\n`);
+  /**
+   * F-3′ (PRDR-137): temp file plus rename. This truncated in place on every
+   * transition, counter bump and note — thousands of writes per run — so a kill
+   * between the truncate and the write left a zero-byte ticket, and `allTickets`
+   * maps the whole directory.
+   */
+  const target = ticketPath(root, validated.id);
+  const tmp = `${target}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(validated, null, 2)}\n`);
+  renameSync(tmp, target);
   return validated;
 }
 
@@ -101,18 +120,35 @@ export interface NewTicket {
   readonly non_goals?: readonly string[];
   readonly surface?: readonly string[];
   readonly blockers?: readonly string[];
+  /** A-1‴ (PRDR-120): the interface this ticket owns, and the ones it leans on. */
+  readonly provides?: readonly ContractProvide[];
+  readonly consumes?: readonly ContractConsume[];
+  /** A-1⁵ (PRDR-201): the requirement ids and baseline items this ticket delivers; C-4⁵ (PRDR-292): the pack criteria it carries. */
+  readonly requirement_ids?: readonly string[];
+  readonly baseline_ids?: readonly string[];
+  readonly criterion_ids?: readonly string[];
   readonly priority?: number;
   readonly risk_label?: boolean;
 }
 
 export function createTicket(root: string, input: NewTicket, at = new Date().toISOString()): Ticket {
+  return writeTicket(root, newTicket(input, at));
+}
+
+/**
+ * The ticket a draft becomes, in memory. Split from `createTicket` so a
+ * caller that must validate a whole plan before touching the directory can
+ * build every ticket first (C-8″, PRDR-118) — a plan the schema refuses used
+ * to leave the plan directory half-rewritten.
+ */
+export function newTicket(input: NewTicket, at = new Date().toISOString()): Ticket {
   const generation: Generation = {
     index: 0,
     counters: { ...ZERO_COUNTERS },
     outcome: "in_flight",
     started_at: at,
   };
-  return writeTicket(root, {
+  return ticketSchema.parse({
     schema_version: SCHEMA_VERSION,
     id: input.id,
     type: input.type,
@@ -121,7 +157,15 @@ export function createTicket(root: string, input: NewTicket, at = new Date().toI
     acceptance_criteria: [...input.acceptance_criteria],
     non_goals: [...(input.non_goals ?? [])],
     surface: [...(input.surface ?? [])],
+    /** PRDR-227: nothing granted at creation — the kernel fills this, after a session, with a note. */
+    granted: [],
     blockers: [...(input.blockers ?? [])],
+    provides: [...(input.provides ?? [])],
+    consumes: [...(input.consumes ?? [])],
+    /** A-1⁵: what it delivers, recorded at creation like the interface above. */
+    requirement_ids: [...(input.requirement_ids ?? [])],
+    baseline_ids: [...(input.baseline_ids ?? [])],
+    criterion_ids: [...(input.criterion_ids ?? [])],
     /** X-4′: discovered at run time, never at creation. */
     waits_on: [],
     links: [],
@@ -140,9 +184,26 @@ export function appendNote(
   note: { readonly author: string; readonly text: string; readonly at?: string },
 ): Ticket {
   const ticket = readTicket(root, id);
+  /**
+   * SEC-4 (PRDR-169): scrubbed at the SEAM, not at each caller.
+   *
+   * Notes carry text a SESSION authored — its final message on a crashed
+   * refusal, its model-fallback reason, and the free-text `note` of the
+   * `oversized.json`/`falsified.json` signals the session writes itself — and
+   * they land in `.detent/plan/<id>.json`, which `fs/layout.ts` marks
+   * `tracking: "committed"`. In the default non-worktree mode `finalizeDone`
+   * runs `git add -A`, so an unscrubbed note is one DONE transition from the
+   * operator's real git history. `referee-gate.ts` has always scrubbed gate
+   * output before writing it; this is the same rule for the other direction.
+   *
+   * Here rather than at today's four call sites because the next site that
+   * appends session text should inherit it rather than remember it — the rule
+   * this audit chain has now forgotten four times. Scrubbing kernel-authored
+   * text too is harmless, and `scrub` is idempotent.
+   */
   return writeTicket(root, {
     ...ticket,
-    notes: [...ticket.notes, { at: note.at ?? new Date().toISOString(), author: note.author, text: note.text }],
+    notes: [...ticket.notes, { at: note.at ?? new Date().toISOString(), author: note.author, text: scrub(note.text) }],
   });
 }
 

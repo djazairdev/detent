@@ -53,7 +53,14 @@ export const LAYOUT: readonly LayoutEntry[] = [
   { rel: "bindings.json", kind: "file", tracking: "committed", ownership: "repository", stamped: true },
   { rel: "plan", kind: "dir", tracking: "committed", ownership: "repository", stamped: true },
   { rel: "research/failures", kind: "dir", tracking: "committed", ownership: "repository", stamped: true },
-  { rel: "research/planning", kind: "dir", tracking: "committed", ownership: "repository", stamped: true },
+  /**
+   * C-2¹¹ (PRDR-281): AUDIT's claim briefs, committed as planning briefs were.
+   * C-3⁵ (PRDR-298): `research/planning` is no longer written; an older root's
+   * briefs there stay committed, read by nothing.
+   */
+  { rel: "research/audit", kind: "dir", tracking: "committed", ownership: "repository", stamped: true },
+  /** X-4⁷ (PRDR-286): each amendment a session filed against the pack, and what the operator decided, beside the pack it changes. */
+  { rel: "amendments", kind: "dir", tracking: "committed", ownership: "repository", stamped: true },
   { rel: "agents", kind: "dir", tracking: "committed", ownership: "repository", stamped: true },
   { rel: ".gitignore", kind: "file", tracking: "committed", ownership: "repository", stamped: false },
 

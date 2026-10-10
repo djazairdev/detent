@@ -1,14 +1,17 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { CI_ENV } from "../adapter/normalize.js";
+import { gateEnv } from "../adapter/normalize.js";
 import { runGate } from "../adapter/run.js";
-import { parseArtifact } from "../schemas/common.js";
+import { SCHEMA_VERSION, parseArtifact } from "../schemas/common.js";
 import { hypothesisSchema, type Hypothesis, type ResearchBrief } from "../schemas/records.js";
 import type { Ticket } from "../schemas/ticket.js";
 import { Breach, publicTicket, type RefereeContext } from "./referee-context.js";
+import { planFindingsInput } from "./session-inputs.js";
 import type { SessionArm } from "./referee-session.js";
 import type { KernelEvent } from "./events.js";
 import { runsDir } from "./journal.js";
+import { contractEvidence } from "./contract-verify.js";
+import { boundTestRunner, falsificationProbe, falsifyEvidence } from "./falsify.js";
 import { diagnoseStage } from "./stages/diagnose.js";
 import { reviewStage } from "./stages/review.js";
 import { researchStage } from "./stages/research.js";
@@ -31,7 +34,7 @@ import { appendNote, linkDiscovered } from "./tickets/mutations.js";
  */
 export function hypothesisSkeleton(): Record<string, unknown> {
   return {
-    schema_version: 1,
+    schema_version: SCHEMA_VERSION,
     claim: "<the single root-cause claim — required>",
     evidence: [{ file: "src/example.ts", line: 1, what: "<what this line shows — required>" }],
     repro_test: "<command or test that reproduces the failure — required>",
@@ -44,7 +47,7 @@ export { reviewSkeleton } from "./stages/review.js";
 
 export function researchBriefSkeleton(): Record<string, unknown> {
   return {
-    schema_version: 1,
+    schema_version: SCHEMA_VERSION,
     failure_signature: "<the failure signature from your inputs>",
     cache_key: "0".repeat(64),
     root_cause: { claim: "<root cause — required>", confidence: "medium" },
@@ -78,7 +81,7 @@ async function diagnose(ticket: Ticket, ctx: RefereeContext, sessions: SessionAr
       await sessions.launch(
         ticket,
         "DIAGNOSED",
-        { ticket: publicTicket(ticket), expected_output: hypothesisSkeleton() },
+        { ticket: publicTicket(ticket, ctx.root), expected_output: hypothesisSkeleton() },
         workDir,
       );
     },
@@ -88,7 +91,7 @@ async function diagnose(ticket: Ticket, ctx: RefereeContext, sessions: SessionAr
       writeFileSync(artifactPath, `${JSON.stringify(h, null, 2)}\n`);
     },
     executeRepro: (command) =>
-      runGate({ command, cwd: workDir, slot: "test", timeoutMs: ctx.budgets.gate_timeout_ms, env: CI_ENV }),
+      runGate({ command, cwd: workDir, slot: "test", timeoutMs: ctx.budgets.gate_timeout_ms, env: gateEnv(ctx.root) }),
     note: (text) => appendNote(ctx.root, id, { author: "kernel", text }),
   });
   return outcome.event;
@@ -100,6 +103,32 @@ async function review(ticket: Ticket, ctx: RefereeContext, sessions: SessionArm,
   const hypothesisParsed = hypothesisRaw === null ? null : parseArtifact(hypothesisSchema, hypothesisRaw);
   const hypothesis = hypothesisParsed !== null && hypothesisParsed.ok ? hypothesisParsed.value : null;
   const diff = ctx.diff(workDir, ctx.claimBase(id), ticket.surface, id);
+  /** A-1⁗: whether the interface the ticket promised is actually in the diff. */
+  const contract = contractEvidence(ticket, diff);
+  /**
+   * V-6 (PRDR-150): were this ticket's tests sensitive to its own change? The
+   * source half is reverted, the bound tests re-run, and the tree restored.
+   * Evidence for the reviewer, never a verdict — see `falsify.ts`.
+   */
+  const probe = await falsificationProbe({
+    workDir,
+    base: ctx.claimBase(id),
+    runTests: (tests) => boundTestRunner(ctx.root, ctx.runBranch.base, ctx.budgets.gate_timeout_ms)(workDir, tests),
+  });
+  if (probe.skipped !== null) ctx.journal.appendTicketEvent(id, { event: "falsify_skipped", at: ctx.iso(), reason: probe.skipped });
+  const evidence = { ...contract, ...falsifyEvidence(probe) };
+  if (probe.unfalsified.length > 0) {
+    appendNote(ctx.root, id, {
+      author: "kernel",
+      text: `tests still pass with this ticket's source changes reverted: ${probe.unfalsified.join(", ")} — passed to the review as evidence (V-6)`,
+    });
+  }
+  if (Object.keys(contract).length > 0) {
+    appendNote(ctx.root, id, {
+      author: "kernel",
+      text: `declared provides not found in the changed files: ${(contract["unverified_provides"] as string[]).join(", ")} — passed to the review as evidence (A-1⁗)`,
+    });
+  }
   const deps = {
     launch: async (inputs: Record<string, unknown>) => {
       await sessions.launch(ticket, "IN_REVIEW", inputs, workDir);
@@ -107,7 +136,7 @@ async function review(ticket: Ticket, ctx: RefereeContext, sessions: SessionArm,
     readArtifact: () => ctx.maybeArtifact(id, "review.json"),
     note: (text: string) => appendNote(ctx.root, id, { author: "kernel", text }),
   };
-  let outcome = await reviewStage(ticket, diff, hypothesis, deps);
+  let outcome = await reviewStage(ticket, diff, hypothesis, deps, evidence);
   /*
    * A-5′ (PRDR-109): a review with no usable verdict — absent or invalid — is
    * relaunched once before it counts. Six of the gate's human stops were a
@@ -117,7 +146,7 @@ async function review(ticket: Ticket, ctx: RefereeContext, sessions: SessionArm,
    */
   if (outcome.kind === "breaker") {
     deps.note(`${outcome.reason} — relaunched once (A-5′)`);
-    outcome = await reviewStage(ticket, diff, hypothesis, deps);
+    outcome = await reviewStage(ticket, diff, hypothesis, deps, evidence);
   }
   if (outcome.kind === "breaker") throw new Breach(`${outcome.reason} (after one relaunch, A-5′)`);
   return outcome.event;
@@ -127,20 +156,19 @@ async function research(ticket: Ticket, ctx: RefereeContext, sessions: SessionAr
   const id = ticket.id;
   const outcome = await researchStage({
     root: ctx.root,
-    launch: async (inputs) => {
-      await sessions.launch(ticket, "RESEARCH", inputs, workDir);
-    },
+    launch: async (inputs) => await sessions.launch(ticket, "RESEARCH", inputs, workDir),
     readArtifact: () => ctx.maybeArtifact(id, "research.json"),
     readFailureSignature: () => {
       const failure = ctx.maybeArtifact(id, "last_failure.json") as { signature?: string } | null;
       return failure?.signature ?? null;
     },
-    toolCallCeiling: ctx.budgets.failure_research_tool_calls,
+    budgets: ctx.budgets,
     note: (text) => appendNote(ctx.root, id, { author: "kernel", text }),
     ticketInputs: {
-      ticket: publicTicket(ticket),
+      ticket: publicTicket(ticket, ctx.root),
       failure: ctx.maybeArtifact(id, "last_failure.json"),
       expected_output: researchBriefSkeleton(),
+      ...planFindingsInput(ctx, id),
     },
   });
   if (outcome.upstream !== undefined) {

@@ -4,6 +4,10 @@ import { CEILINGS, type Budgets } from "../../src/schemas/budgets.js";
 import { loadPromptSet } from "../../src/sessions/prompts.js";
 import { okResult, type StageFn } from "../../src/sessions/mock.js";
 import { gitInit, removeTree, tmpTree } from "../helpers.js";
+import { SCHEMA_VERSION } from "../../src/schemas/common.js";
+import type { PhaseHandler } from "../../src/init/machine.js";
+import { buildPipeline, type PipelineDeps } from "../../src/init/pipeline.js";
+import type { DecidedStack } from "../../src/init/decide-log.js";
 
 /** Shared init-test fixture: one planner mock, one repo shape, one budget set. */
 
@@ -24,17 +28,21 @@ export function repo(files: Record<string, string> = {}): string {
   return root;
 }
 
-export const ANALYSIS = (stack: object | null): object => ({
-  schema_version: 1,
-  summary: "s",
-  stack,
-  questions: [],
-  assumptions: [],
-  docs_read: ["PRD.md"],
+/**
+ * D-10′ (PRDR-290): a stack entry as the decision log records it and the
+ * pack's parse carries it, the gates by slot; DETERMINE_VERIFICATION binds
+ * from it in greenfield.
+ */
+export const STACK = (language: string, gates: Readonly<Record<string, string>> = {}): DecidedStack => ({
+  decision: "X-1",
+  language,
+  toolchain: "the documents' toolchain",
+  scaffold_files: [],
+  gates,
 });
 
 export const DRAFT = (ids: string[]): object => ({
-  schema_version: 1,
+  schema_version: SCHEMA_VERSION,
   tickets: ids.map((id, i) => ({
     id,
     type: "feature",
@@ -48,17 +56,83 @@ export const DRAFT = (ids: string[]): object => ({
   })),
 });
 
-export const APPROVE_PLAN = { schema_version: 1, verdict: "approve", findings: [] };
+/**
+ * PRDR-281: AUDIT runs on every raw document set, directly after DISCOVER. A
+ * test of the phases after it gets an audit that reads every document it is
+ * given and finds nothing, so what the test asserts is what its own stage did.
+ */
+export const CLEAN_AUDIT: StageFn = (spec) => {
+  const inputs = (JSON.parse(spec.promptVariable) as { inputs: Record<string, unknown> }).inputs;
+  const survey = { schema_version: SCHEMA_VERSION, documents_read: inputs["documents"] ?? [], contradictions: [], gaps: [], drift: [], claims: [] };
+  writeFileSync(spec.artifactOut, `${JSON.stringify(survey)}\n`);
+  return okResult();
+};
 
-/** The planner answers whichever artifact the spec asks for (three stages since PRDR-084). */
+/**
+ * PRDR-282: DECIDE runs a session while any item is open, and in greenfield the
+ * stack is one until the decision log records it. A test of the phases after
+ * DECIDE gets a session that settles every item by one default, the stack by
+ * `stack`, so what the test asserts is what its own stage did.
+ */
+export const decideDefaults =
+  (stack: object = { language: "typescript", toolchain: "node" }): StageFn =>
+  (spec) => {
+    const inputs = (JSON.parse(spec.promptVariable) as { inputs: { items?: { id: string }[] } }).inputs;
+    const ids = (inputs.items ?? []).map((i) => i.id);
+    const rest = ids.filter((id) => id !== "stack");
+    const artifact = {
+      schema_version: SCHEMA_VERSION,
+      defaults: [
+        ...(rest.length === 0 ? [] : [{ value: "the documents as written", reason: "the fixture's", settles: rest }]),
+        ...(ids.includes("stack") ? [{ value: "the stack", reason: "the fixture's", settles: ["stack"], stack }] : []),
+      ],
+    };
+    writeFileSync(spec.artifactOut, `${JSON.stringify(artifact)}\n`);
+    return okResult();
+  };
+
+/**
+ * PRDR-283: WRITE rewrites a raw document set into the pack before anything
+ * plans. A test of the planning phases plans from its fixture's documents as
+ * written, which is the path planning takes wherever WRITE writes nothing (a
+ * pack, or `plan_docs`), so it leaves WRITE out, and VALIDATE with it
+ * (PRDR-284), which validates no pack on a raw set: the phases after them read
+ * DISCOVER's documents, as they do where neither is in the pipeline. What they
+ * read from the pack is `write-plan.test.ts`'s and `validate-plan.test.ts`'s.
+ */
+export function planningPipeline(deps: PipelineDeps): PhaseHandler[] {
+  return buildPipeline(deps).filter((h) => h.phase !== "WRITE" && h.phase !== "VALIDATE");
+}
+
+export const APPROVE_PLAN = { schema_version: SCHEMA_VERSION, verdict: "approve", findings: [] };
+
+/** C-2‴: one slice over the whole pack — the shape a small product's SLICE produces. */
+export const ONE_SLICE = {
+  schema_version: SCHEMA_VERSION,
+  slices: [
+    { id: "s01", title: "the product", goal: "it works end to end", requirement_ids: [], baseline_items: [], docs: [], depends_on: [], rationale: "" },
+  ],
+};
+
+/**
+ * C-4⁸ (PRDR-294): one stage for both roles that write a planning artifact,
+ * the drafter's and the review's, so a fixture that answers by artifact keeps
+ * answering the review now that it runs on a role of its own.
+ */
+export const planning = (stage: StageFn): { readonly planner: StageFn; readonly plan_review: StageFn } => ({ planner: stage, plan_review: stage });
+
+/** The planner answers whichever artifact the spec asks for: SLICE's, PLAN's or a review's (three stages since D-10′). */
 export const planner =
-  (analysis: object, draft: object, review: object = APPROVE_PLAN): StageFn =>
+  (draft: object, review: object = APPROVE_PLAN, slices: object = ONE_SLICE): StageFn =>
   (spec) => {
     const artifact = spec.artifactOut.endsWith("plan-draft.json")
       ? draft
       : spec.artifactOut.endsWith("plan-review.json")
         ? review
-        : analysis;
+        : spec.artifactOut.endsWith("slices.json")
+          ? slices
+          : null;
+    if (artifact === null) throw new Error(`the planner was asked for ${spec.artifactOut}, which no planning stage writes`);
     writeFileSync(spec.artifactOut, `${JSON.stringify(artifact)}\n`);
     return okResult();
   };

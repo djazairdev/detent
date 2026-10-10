@@ -1,5 +1,9 @@
 import path from "node:path";
+import { readlinkSync, realpathSync } from "node:fs";
 import picomatch from "picomatch";
+import { SPAWN_TOOLS } from "../fs/hook-files.js";
+import { globHazard } from "../schemas/glob-hazard.js";
+import { commandOf, readGitRm, type GitRmReading } from "./git-rm.js";
 
 /**
  * T-046 — the containment guard (S-2/D-21, SEC-3), as pure decision functions.
@@ -12,17 +16,66 @@ import picomatch from "picomatch";
  * the seven oracle hook tests port without a live session.
  */
 
+/**
+ * D-28″ (PRDR-215): the spawn names the guard refuses, re-exported from their
+ * dependency-free home so every reader of the decision finds them here. The
+ * denial itself is in `guardToolUse`: a spawn names no path, so the guard
+ * abstained, and the platform grants `Agent` without consulting `allowedTools`
+ * — gate-313's review-fix sessions each ran a sub-agent outside the turn
+ * ceiling and outside anything the ledger can name.
+ */
+export { SPAWN_TOOLS };
+
 export interface GuardPolicy {
+
+
   /** The ticket's declared surface plus the artifact-out area. */
   readonly surface: readonly string[];
   /** SEC-3: ticket/criteria/config self-modification is always denied. */
   readonly protectedGlobs: readonly string[];
   /** The work root; anything resolving outside it is denied. */
   readonly workRoot: string;
+  /**
+   * B-2″ (PRDR-180): the one directory a session may write OUTSIDE its work
+   * root — where its own artifact goes.
+   *
+   * `artifactOut` is always `<root>/.detent/runs/<ticket>/…` while `workRoot`
+   * is the per-ticket worktree, and worktrees are the default. So the artifact
+   * every review, diagnose and research session is required to produce resolved
+   * to a sibling of its work root and was denied as an escape — in the default
+   * configuration. Every test missed it by running non-worktree, where the two
+   * paths coincide.
+   *
+   * Deliberately ONE directory and not "the project root": granting the root
+   * would let a session write the operator's own checkout, which is the harm
+   * B-2″ made worktrees the default to prevent.
+   */
+  readonly artifactRoot?: string;
+  /**
+   * C-4⁵ (PRDR-292): absolute directories no tool of this session may reach,
+   * to read as much as to write: a planner's is the root's `archive/`, the
+   * originals a pack was written from (C-2⁷). Absent, nothing is refused on
+   * that ground.
+   */
+  readonly unreadable?: readonly string[];
 }
 
 export interface GuardDecision {
-  readonly decision: "allow" | "deny";
+  /**
+   * S-2‴ (PRDR-122): `abstain` is not `allow`. The SDK evaluates permissions in
+   * a fixed order — hooks, then deny rules, then ask rules, then the mode, then
+   * the ALLOW RULES — and a hook that says `allow` ends that evaluation. So
+   * answering `allow` for a tool this guard does not govern silently overrode
+   * `allowedTools`: every `Bash` call was permitted despite the allowlist
+   * granting only `Bash(git add:*)` and `Bash(git commit:*)`, because a bash
+   * call names no path and fell through to the old blanket allow. Abstaining
+   * returns the decision to the SDK's own order, where the MODE comes before
+   * the allow rules: the default mode approves a read-only shell command that
+   * no allowlist names. What binds such a call is the session's base set of
+   * built-in tools, which the SDK backend derives from its allowlist (S-1⁵,
+   * PRDR-302): a role given no shell has none to call.
+   */
+  readonly decision: "allow" | "deny" | "abstain";
   readonly reason: string;
 }
 
@@ -31,14 +84,29 @@ export interface GuardDecision {
  * and its children; `dir/**` also matches the bare directory. picomatch is the
  * one glob engine (R-6); the conveniences are layered explicitly.
  */
-export function matchAny(rel: string, patterns: readonly string[]): boolean {
+const asciiFold = (s: string): string => s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+
+/**
+ * SEC-3 (PRDR-245): `nocase` folds ASCII case, and only the PROTECTED side
+ * passes it.
+ *
+ * Folding the deny direction can only refuse more; folding the grant direction
+ * would let `SRC/evil.ts` in under a `src/**` surface. The fold is ASCII rather
+ * than `toLowerCase`, which is locale-sensitive, and it reaches the literal
+ * comparison only — the glob matches take picomatch's own `nocase`, so a
+ * character class in an operator-supplied pattern is not rewritten underneath
+ * them.
+ */
+export function matchAny(rel: string, patterns: readonly string[], opts: { readonly nocase?: boolean } = {}): boolean {
+  const nocase = opts.nocase === true;
   const clean = rel.replace(/^\.\//, "");
+  const folded = nocase ? asciiFold(clean) : clean;
   for (const raw of patterns) {
     const p = String(raw).replace(/^\.\//, "");
     const bare = p.replace(/\/\*\*$/, "").replace(/\/$/, "");
-    if (clean === bare) return true;
-    if (picomatch.isMatch(clean, p, { dot: true })) return true;
-    if (picomatch.isMatch(clean, `${bare}/**`, { dot: true })) return true;
+    if (folded === (nocase ? asciiFold(bare) : bare)) return true;
+    if (picomatch.isMatch(clean, p, { dot: true, nocase })) return true;
+    if (picomatch.isMatch(clean, `${bare}/**`, { dot: true, nocase })) return true;
   }
   return false;
 }
@@ -60,57 +128,382 @@ export function pathOf(toolInput: unknown): string | null {
 const MUTATING_TOOLS: ReadonlySet<string> = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 
 /**
+ * The path relative to this session's artifact directory, or `null` when it is
+ * not inside one. Resolved on both sides for the same reason the work-root
+ * check is (PRDR-180).
+ */
+function artifactRelative(artifactRoot: string, resolveReal: (p: string) => string, absolute: string): string | null {
+  try {
+    const rel = path.relative(resolveReal(artifactRoot), resolveReal(absolute));
+    return rel.startsWith("..") || path.isAbsolute(rel) ? null : rel;
+  } catch {
+    /* An artifact root that cannot be resolved is not an artifact root; fall through to the deny. */
+    return null;
+  }
+}
+
+/**
+ * S-2⁗ (PRDR-127): where a path actually LANDS, with symbolic links followed.
+ *
+ * `path.resolve` normalises `..` lexically and follows nothing, so the guard
+ * used to judge the path a session typed rather than the file it would open.
+ *
+ * Two things make this more than a `realpathSync` call. A `Write` usually names
+ * a file that does not exist yet, and `realpath` throws on those — so this walks
+ * up to the nearest ancestor that DOES exist, resolves that, and rejoins the
+ * segments below it. And a path with no existing ancestor at all resolves to its
+ * lexical form, because a tree that is not on disk has no links to follow; that
+ * is what keeps the oracle hook tests meaningful against their fictional root.
+ *
+ * It does not throw. An unresolvable path degrades to the lexical answer, which
+ * is exactly the pre-existing behaviour rather than a new way to fail.
+ */
+export function realpathNearest(target: string, maxHops = 40): string {
+  const absolute = path.resolve(target);
+  const trailing: string[] = [];
+  const below = (base: string): string => (trailing.length === 0 ? base : path.join(base, ...[...trailing].reverse()));
+  let current = absolute;
+  let hops = 0;
+  for (;;) {
+    try {
+      return below(realpathSync.native(current));
+    } catch {
+      /* not resolvable as it stands — it may still be a link, or not exist at all */
+    }
+    /**
+     * A DANGLING link still names a destination. `realpathSync` throws on one,
+     * and stopping here would fall back to the lexical path — which is a hole,
+     * not a degradation: the Write tool creates parent directories, so a link
+     * to a not-yet-existing directory OUTSIDE the worktree would be created and
+     * written to. It is read manually and followed.
+     */
+    let link: string | null = null;
+    try {
+      link = readlinkSync(current);
+    } catch {
+      link = null;
+    }
+    if (link !== null) {
+      /* A cycle of links resolves to nothing on any filesystem; stop and let the boundary judge. */
+      if (hops >= maxHops) return below(current);
+      hops += 1;
+      current = path.resolve(path.dirname(current), link);
+      continue;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return absolute;
+    trailing.push(path.basename(current));
+    current = parent;
+  }
+}
+
+/** Whether `p` is `dir` or inside it. */
+const within = (dir: string, p: string): boolean => {
+  const rel = path.relative(dir, p);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+};
+
+/**
+ * Whether a Glob pattern, read from its search root, can match a path below
+ * `below`, a directory under that root: segment by segment, until a `**` or
+ * the directory's own segments are passed with the pattern still going.
+ */
+function globDescends(pattern: string, below: string): boolean {
+  const segments = pattern.split("/").filter((s) => s !== "" && s !== ".");
+  const dirs = below.split("/");
+  for (const [i, dir] of dirs.entries()) {
+    const segment = segments[i];
+    if (segment === undefined) return false;
+    if (segment.includes("**")) return true;
+    if (!picomatch.isMatch(dir, segment, { dot: true })) return false;
+  }
+  return segments.length > dirs.length;
+}
+
+/**
+ * C-4⁵ (PRDR-292): the directory of `policy.unreadable` a call reaches, or
+ * null. A path inside one reaches it, as written or resolved, and the
+ * directory is compared resolved too, so a link reaches it wherever the root
+ * itself is reached through one; so does a search whose root holds one: Grep
+ * from any directory above it, and Glob with a pattern that can match below
+ * it. Grep and Glob search the working directory where they name no path.
+ */
+function unreadableReached(toolName: string, toolInput: unknown, policy: GuardPolicy, resolveReal: (p: string) => string): string | null {
+  const dirs = policy.unreadable ?? [];
+  if (dirs.length === 0) return null;
+  const search = toolName === "Grep" || toolName === "Glob";
+  const target = pathOf(toolInput) ?? (search ? "." : null);
+  if (target === null) return null;
+  const pattern = toolName === "Glob" ? String((toolInput as { pattern?: unknown }).pattern ?? "") : "";
+  /* A Glob pattern's leading directories are part of where it searches. */
+  const base = toolName === "Glob" ? picomatch.scan(pattern).base : "";
+  /* Unresolvable: judged as written, which the containment check refuses anyway. */
+  const resolved = (p: string): string => {
+    try {
+      return resolveReal(p);
+    } catch {
+      return p;
+    }
+  };
+  const at = path.resolve(policy.workRoot, target, base);
+  const real = resolved(at);
+  for (const dir of dirs.map((d) => path.resolve(d))) {
+    const shown = `${path.relative(policy.workRoot, dir).split(path.sep).join("/")}/`;
+    const pairs = [[dir, at], [resolved(dir), real]] as const;
+    if (pairs.some(([d, p]) => within(d, p)) || within(dir, real)) return shown;
+    const above = pairs.find(([d, p]) => within(p, d));
+    if (!search || above === undefined) continue;
+    if (toolName === "Grep") return shown;
+    const glob = base === "" ? pattern : pattern.slice(base.length).replace(/^\/+/u, "");
+    if (globDescends(glob, path.relative(above[1], above[0]).split(path.sep).join("/"))) return shown;
+  }
+  return null;
+}
+
+/**
+ * SEC-3″ (PRDR-330): the first of a policy's globs that picomatch cannot match
+ * safely or as written, checked before any is matched. A match that does not
+ * end holds Detent's event loop, and a glob read as its own spelling protects
+ * less than it says. A plan's and a config's globs were checked where they
+ * were read. A policy file the plugin hook reads was checked nowhere.
+ */
+function policyHazard(policy: GuardPolicy): string | null {
+  for (const glob of [...policy.protectedGlobs, ...policy.surface]) {
+    const hazard = globHazard(glob);
+    if (hazard !== null) return hazard;
+  }
+  return null;
+}
+
+/**
+ * SEC-3″ (PRDR-330): a Glob call's pattern, which the unreadable check matches
+ * against the way to each directory the session may not read (C-4⁵), when
+ * picomatch cannot match it safely. A session names that pattern at will.
+ */
+function searchHazard(toolName: string, toolInput: unknown, policy: GuardPolicy): string | null {
+  if (toolName !== "Glob" || (policy.unreadable ?? []).length === 0) return null;
+  const pattern = typeof toolInput === "object" && toolInput !== null ? (toolInput as { pattern?: unknown }).pattern : undefined;
+  return typeof pattern === "string" && pattern !== "" ? globHazard(pattern) : null;
+}
+
+/**
  * The PreToolUse decision (oracle `pretooluse_guard.py`, S-2″). Deny-by-default
  * outside the declared surface FOR MUTATION; protected denies mutation always
  * (SEC-3 is immutability, not unreadability); the worktree bounds every tool,
  * reads included (P7). Surface expansion is a KERNEL decision — the guard only
  * points at the lever (SEC-3).
+ *
+ * S-2⁗ (PRDR-127): every one of those checks runs on the RESOLVED destination.
+ * A symbolic link inside the worktree used to walk past all three — the
+ * boundary, the surface, and the SEC-3 protected globs, which is an
+ * immutability bypass. The destination is what is judged, never the mechanism:
+ * a link pointing somewhere the session may already write stays allowed,
+ * because refusing links as a class would refuse `node_modules/.bin` and every
+ * monorepo workspace link.
+ *
+ * `resolveReal` is a parameter so the decision stays testable without a
+ * filesystem — production passes nothing, tests inject identity or a fake map.
  */
-export function guardToolUse(toolName: string, toolInput: unknown, policy: GuardPolicy): GuardDecision {
-  const target = pathOf(toolInput);
-  /**
-   * A tool call naming no path (or a malformed one) is allowed here: bricking
-   * the session gains nothing, and the kernel re-runs full gates regardless (P2).
-   */
-  if (target === null) return { decision: "allow", reason: "no path in tool input" };
-
-  const rel = path.relative(path.resolve(policy.workRoot), path.resolve(policy.workRoot, target));
-  if (rel.startsWith("..") || path.isAbsolute(rel)) {
-    return { decision: "deny", reason: `DENY: ${target} is outside the worktree.` };
-  }
-  if (!MUTATING_TOOLS.has(toolName)) {
-    return { decision: "allow", reason: `${rel} read inside the worktree (S-2″)` };
-  }
-  if (matchAny(rel, policy.protectedGlobs)) {
+export function guardToolUse(
+  toolName: string,
+  toolInput: unknown,
+  policy: GuardPolicy,
+  resolveReal: (p: string) => string = realpathNearest,
+): GuardDecision {
+  /* D-28″ (PRDR-215): a spawn names no path; it is refused before the path judgement, for every role. */
+  if ((SPAWN_TOOLS as readonly string[]).includes(toolName)) {
     return {
       decision: "deny",
-      reason: `DENY: ${rel} is protected (protected globs and ticket criteria are immutable to sessions — SEC-3).`,
+      reason:
+        `DENY: ${toolName} would spawn a billable session outside the ledger — a session does its own work, ` +
+        "and a billable session exists only through the metered path (D-28).",
+    };
+  }
+  const unmatchable = searchHazard(toolName, toolInput, policy);
+  if (unmatchable !== null) {
+    return {
+      decision: "deny",
+      reason:
+        `DENY: this Glob call's pattern cannot be matched safely: ${unmatchable}. The guard matches a Glob pattern against the way to ` +
+        "each directory this session may not read (C-4⁵), so it refuses one it cannot match safely: name the directories you need instead.",
+    };
+  }
+  const barred = unreadableReached(toolName, toolInput, policy, resolveReal);
+  if (barred !== null) {
+    return {
+      decision: "deny",
+      reason:
+        `DENY: this call reaches ${barred}, which this session may not read: it holds the originals the pack was written from, ` +
+        "and planning reads the pack. Read or search the directories you need instead, naming them in the call.",
+    };
+  }
+  /* S-3⁵ (PRDR-213): the one Bash verb that names paths is judged on them. */
+
+  if (toolName === "Bash") {
+    const reading = readGitRm(commandOf(toolInput));
+    if (reading !== null) return judgeGitRm(reading, policy, resolveReal);
+  }
+  const target = pathOf(toolInput);
+  /**
+   * A tool call naming no path is not this guard's business — it governs WHERE
+   * a mutation lands. Abstaining hands it back to the SDK's permission order
+   * rather than granting it, which is what an `allow` here did; the session's
+   * base set decides whether it has the tool at all (S-1⁵).
+   */
+  if (target === null) return { decision: "abstain", reason: "no path in tool input — the allowlist decides" };
+
+  const root = path.resolve(policy.workRoot);
+  const absolute = path.resolve(root, target);
+
+  /**
+   * B-2″ (PRDR-180): the session's own artifact directory, judged FIRST.
+   *
+   * `artifactOut` is under the project root while `workRoot` is the per-ticket
+   * worktree, and worktrees are the default — so the artifact every review,
+   * diagnose and research session must produce resolved to a sibling of its
+   * work root and was denied by the containment check below. In the default
+   * configuration. Every test missed it by running non-worktree, where the two
+   * paths coincide.
+   *
+   * Lexically first and then resolved, matching the containment check: a
+   * symlink into the artifact area is judged on its real destination.
+   */
+  if (policy.artifactRoot !== undefined) {
+    const artifactRoot = path.resolve(policy.artifactRoot);
+    const lexical = path.relative(artifactRoot, absolute);
+    if (!lexical.startsWith("..") && !path.isAbsolute(lexical)) {
+      const real = artifactRelative(artifactRoot, resolveReal, absolute);
+      if (real === null) {
+        return { decision: "deny", reason: `DENY: ${target} resolves through a symbolic link out of this session's artifact area.` };
+      }
+      return MUTATING_TOOLS.has(toolName)
+        ? { decision: "allow", reason: `${real} is this session's own artifact area (B-2″)` }
+        : { decision: "abstain", reason: `${real} is this session's artifact area; the allowlist decides (S-2″)` };
+    }
+  }
+
+  /* Lexical `..` is refused before any filesystem work, exactly as before. */
+  const typed = path.relative(root, absolute);
+  if (typed.startsWith("..") || path.isAbsolute(typed)) {
+    return { decision: "deny", reason: `DENY: ${target} is outside the worktree.` };
+  }
+
+  /**
+   * BOTH sides are resolved. On macOS `/tmp` is itself a link to `/private/tmp`,
+   * so comparing a resolved target against an unresolved root would report every
+   * temp-directory worktree as an escape — a fix noisier than the bug.
+   */
+  let rel: string;
+  try {
+    rel = path.relative(resolveReal(root), resolveReal(absolute));
+  } catch (err) {
+    /* Containment that cannot be established is not containment that passed. */
+    return {
+      decision: "deny",
+      reason: `DENY: ${typed} could not be resolved to a real path (${(err as Error).message}) — containment cannot be established.`,
+    };
+  }
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    return { decision: "deny", reason: `DENY: ${typed} resolves through a symbolic link to a path outside the worktree.` };
+  }
+  if (!MUTATING_TOOLS.has(toolName)) {
+    /* Inside the worktree and not a mutation: bounded by P7 above, granted by the allowlist. */
+    return { decision: "abstain", reason: `${rel} is inside the worktree; the allowlist decides (S-2″)` };
+  }
+  /*
+   * SEC-3″ (PRDR-330), P5: a policy the guard cannot match safely and as written
+   * is not honoured. PRDR-331: what it refuses is a write into the worktree. The
+   * session's own artifact area was decided above (B-2″) and matches no glob, so
+   * it stays writable.
+   */
+  const unsafe = policyHazard(policy);
+  if (unsafe !== null) {
+    return {
+      decision: "deny",
+      reason:
+        `DENY: this session's policy cannot be honoured: ${unsafe}. No write into the worktree is allowed under a policy the guard ` +
+        "cannot match safely and as written, until the plan or config that supplied it is fixed (P5).",
+    };
+  }
+  /* Where the two disagree, the human is told which path the verdict is about. */
+  const via = rel === typed ? "" : ` (reached through a symbolic link from ${typed})`;
+  /**
+   * SEC-3 (PRDR-245): folded, because `realpathNearest` canonicalises only the
+   * EXISTING prefix. A protected path with nothing on disk beneath it keeps the
+   * case the session typed, and on a case-insensitive filesystem the write then
+   * lands on the protected file — `NODE_MODULES/lodash/index.js` was allowed in
+   * a fresh worktree, where PRDR-149 protects `node_modules/**` because writing
+   * a dependency is writing an executable the gate will run.
+   */
+  if (matchAny(rel, policy.protectedGlobs, { nocase: true })) {
+    return {
+      decision: "deny",
+      reason: `DENY: ${rel} is protected${via} (protected globs and ticket criteria are immutable to sessions — SEC-3).`,
     };
   }
   if (!matchAny(rel, policy.surface)) {
     return {
       decision: "deny",
       reason:
-        `DENY: ${rel} is outside this ticket's declared surface. If genuinely required, request a surface ` +
+        `DENY: ${rel} is outside this ticket's declared surface${via}. If genuinely required, request a surface ` +
         `expansion with a one-line justification by writing surface_request.json at the path given in your inputs (SEC-3).`,
     };
   }
   return { decision: "allow", reason: `${rel} is inside the declared surface` };
 }
 
+
+/**
+ * S-3⁵ (PRDR-213): a `git rm` is judged where a Write to each of its paths
+ * would be — the same boundary, protection and surface, one path at a time —
+ * and one refused path refuses the call. What cannot be read is refused too:
+ * this guard abstains on a call that names no path (S-2‴), and this one does.
+ */
+function judgeGitRm(reading: GitRmReading, policy: GuardPolicy, resolveReal: (p: string) => string): GuardDecision {
+  if (!reading.ok) {
+    return {
+      decision: "deny",
+      reason:
+        `DENY: a \`git rm\` the guard cannot read is refused — ${reading.detail}. One simple command, plain paths ` +
+        "one per token; the options read are -f, -q, --cached and -- (no -r, no globs, no shell syntax) (S-3⁵).",
+    };
+  }
+  for (const target of reading.paths) {
+    const verdict = guardToolUse("Write", { file_path: target }, policy, resolveReal);
+    if (verdict.decision !== "allow") return { decision: "deny", reason: verdict.reason };
+  }
+  return { decision: "allow", reason: `git rm ${reading.paths.join(" ")}: every path is inside the declared surface (S-3⁵)` };
+}
 /*
  * ---------------------------------------------------------------------------
  * Stop gate (oracle `stop_gate.py`) — an accelerant, never the authority (P2).
  */
 
-/** S-1's read-only roles have no stop gate: they produce artifacts, not diffs. */
-export const READ_ONLY_STAGES: ReadonlySet<string> = new Set(["planner", "diagnose", "research", "review"]);
+/**
+ * S-1's read-only roles have no stop gate: they produce artifacts, not diffs.
+ * `spec_review` runs scripts when its round has a sandbox (S-1⁗), in a scratch
+ * directory outside the repository, and still changes no code the product's
+ * gate could judge; a run's limits are the sandbox's, not a gate's.
+ */
+export const READ_ONLY_STAGES: ReadonlySet<string> = new Set(["planner", "diagnose", "research", "review", "audit", "spec_review", "plan_review"]);
+
+/**
+ * S-1‴ (PRDR-283): roles that write documents and not code, which the
+ * product's gate does not judge either. `spec_write` was stop-gated from the
+ * day DECIDE launched it (PRDR-282): the live backend binds the project's test
+ * command, so a re-init of a bound project whose tests were red kept DECIDE's
+ * session from ending over code it cannot touch. WRITE's session, with Edit
+ * and Write on the pack's paths, would have been told to fix that code too.
+ */
+export const DOCUMENT_STAGES: ReadonlySet<string> = new Set(["spec_write"]);
 
 export interface StopGateInput {
   readonly stage: string;
   readonly gateCmd: string | null;
   /** True when this stop is already a stop-hook continuation — the loop guard. */
   readonly stopHookActive: boolean;
+  /** PRDR-211: where the session works — the scoped gate runs THERE, not in the root. */
+  readonly cwd?: string;
 }
 
 export interface StopGateDecision {
@@ -126,15 +519,15 @@ export interface StopGateDecision {
  */
 export async function stopGate(
   input: StopGateInput,
-  runScopedGate: (command: string) => Promise<{ readonly green: boolean; readonly outputTail: string }>,
+  runScopedGate: (command: string, cwd?: string) => Promise<{ readonly green: boolean; readonly outputTail: string }>,
 ): Promise<StopGateDecision> {
   if (input.stopHookActive) {
     return { decision: "allow", reason: "stop-hook continuation already active; the kernel judges from here" };
   }
-  if (input.gateCmd === null || input.gateCmd.trim() === "" || READ_ONLY_STAGES.has(input.stage)) {
+  if (input.gateCmd === null || input.gateCmd.trim() === "" || READ_ONLY_STAGES.has(input.stage) || DOCUMENT_STAGES.has(input.stage)) {
     return { decision: "allow", reason: "no stop gate for this stage" };
   }
-  const result = await runScopedGate(input.gateCmd);
+  const result = await runScopedGate(input.gateCmd, input.cwd);
   if (result.green) return { decision: "allow", reason: "scoped gate green" };
   return {
     decision: "block",
@@ -145,24 +538,9 @@ export async function stopGate(
 /*
  * ---------------------------------------------------------------------------
  * Tool surfaces per role (S-3): the surface, never the containment.
+ *
+ * S-1⁵ (PRDR-302): defined with the roles (`src/schemas/roles.ts`), below
+ * every layer, so the kernel gives a `run` session the same list the plugin
+ * build writes into each agent file; re-exported here for this layer's callers.
  */
-
-const READ_ONLY_TOOLS = ["Read", "Grep", "Glob"] as const;
-const WRITE_TOOLS = ["Read", "Grep", "Glob", "Edit", "Write"] as const;
-
-/**
- * X-6/S-3: research adds WebSearch plus a domain-scoped WebFetch rule per
- * configured docs domain. The `WebFetch(domain:…)` specifier form is composed
- * here and VERIFIED against the pinned backend by `doctor` (T-050) — an
- * unrecognized form must fail loudly there, never no-op silently (PRDR-050).
- * The domains parameter has no config home yet — that gap is PRDR-062.
- */
-export function researchTools(docsDomains: readonly string[]): string[] {
-  return [...READ_ONLY_TOOLS, "WebSearch", ...docsDomains.map((d) => `WebFetch(domain:${d})`)];
-}
-
-export function toolsForRole(role: string, docsDomains: readonly string[] = []): string[] {
-  if (role === "research") return researchTools(docsDomains);
-  if (READ_ONLY_STAGES.has(role)) return [...READ_ONLY_TOOLS];
-  return [...WRITE_TOOLS, "Bash(git add:*)", "Bash(git commit:*)"];
-}
+export { researchTools, toolsForRole } from "../schemas/roles.js";

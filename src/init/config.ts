@@ -1,8 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { probeSymbols, type SymbolsConfig, type SymbolsStatus } from "../adapter/symbols.js";
 import { stateDir, writeArtifact } from "../fs/layout.js";
+import { loadConfig } from "../kernel/worstcase.js";
 import { CEILINGS } from "../schemas/budgets.js";
+import { DEFAULT_EFFORT_ROUTING, DEFAULT_MODEL_ROUTING, DEFAULT_TASK_EFFORT_ROUTING, TASK_KEYS } from "../schemas/roles.js";
 
 /**
  * T-140 — `init` writes the project config (R-9, X-1, S-5).
@@ -12,7 +15,8 @@ import { CEILINGS } from "../schemas/budgets.js";
  * one the USER chose — the `--spend-cap-usd` argument is that choice, an
  * input like `--replan`, not a sixth decision (C-5 stays closed). Everything
  * else config carries starts at its documented default: the X-1 ceilings via
- * schema defaults, the F-1 protected set, no risk globs, no model routing.
+ * schema defaults, the F-1 protected set, no risk globs, and PRDR-114's model
+ * routing — judgement roles on the stronger models, volume roles on Sonnet.
  *
  * The v2 line shipped without this writer because its live exits (T-051,
  * T-070) never ran — the fixture wrote config by hand. The N-7 self-build
@@ -23,7 +27,7 @@ import { CEILINGS } from "../schemas/budgets.js";
 const DEFAULT_PROTECTED = ["tickets/**", ".detent/tickets/**", "AGENTS.md", "CLAUDE.md"] as const;
 
 /** S-5: the agent-sdk pin mirrors package.json's exact dependency. */
-const PINNED_AGENT_SDK = "0.3.191";
+const PINNED_AGENT_SDK = "0.3.285";
 
 /**
  * S-5's backend pin is "the version this project initialized against":
@@ -56,8 +60,92 @@ export function ensureConfig(root: string, spendCapUsd?: number): EnsureConfigRe
     budgets: { run_spend_usd: cap },
     protected: [...DEFAULT_PROTECTED],
     risk: [],
-    model_routing: {},
+    model_routing: { ...DEFAULT_MODEL_ROUTING },
+    /**
+     * PRDR-263: populated, and PRESENT. PRDR-197 shipped this knob visible and
+     * inert — "the default must change nothing, but a knob an operator cannot
+     * see in the file they edit is one they do not have" — and the second half
+     * of that argument outlived the first. An unrouted role takes the SDK's own
+     * default, `high`, with nothing written down anywhere; a routed one is a
+     * decision the operator can read in the file and change.
+     */
+    /* S-5⁷: beside the roles, each task a measurement moved apart from its role. */
+    effort_routing: { ...DEFAULT_EFFORT_ROUTING, ...DEFAULT_TASK_EFFORT_ROUTING },
+    plan_baseline: "production",
     pinned: { agent_sdk: PINNED_AGENT_SDK, claude_code: installedClaudeVersion() },
   });
   return spendCapUsd === undefined ? "written-default" : "written";
+}
+
+/** `planner, audit → max`: the roles on each value, in the table's order. */
+function grouped(table: Readonly<Record<string, string>>): string {
+  const roles = new Map<string, string[]>();
+  for (const [role, value] of Object.entries(table)) roles.set(value, [...(roles.get(value) ?? []), role]);
+  return [...roles].map(([value, names]) => `${names.join(", ")} → ${value}`).join("; ");
+}
+
+/**
+ * PRDR-114, PRDR-263: what a first `init` says it routed, so a default the
+ * operator did not choose is one they can see.
+ *
+ * Built from the tables. The sentences named every role by hand, and a role
+ * added to the tables would have been routed and never named (PRDR-281). The
+ * keys a task can be routed under are named too (S-5⁷): a knob an
+ * operator cannot see is one they do not have (PRDR-197).
+ */
+export function routingNote(): string {
+  return (
+    `model routing defaulted (PRDR-114, S-5⁶): ${grouped(DEFAULT_MODEL_ROUTING)}. A routed model this runtime cannot serve ` +
+    "falls back to the runtime default, noted per session. Edit model_routing in .detent/config.json to change it.\n" +
+    `effort routing defaulted (PRDR-263, S-5⁵): ${grouped({ ...DEFAULT_EFFORT_ROUTING, ...DEFAULT_TASK_EFFORT_ROUTING })}. A level the routed model cannot serve ` +
+    "is downgraded silently by the SDK and noted per session. Edit effort_routing in .detent/config.json to change it.\n" +
+    `A task can be routed apart from its role under its own key (S-5⁷): ${TASK_KEYS.join(", ")}.\n`
+  );
+}
+
+export type SymbolsDecision = "on" | "off";
+
+/**
+ * S-3⁗ (PRDR-208): `--symbols` / `--no-symbols` — a person deciding, carried
+ * where a TTY prompt cannot go.
+ *
+ * S-3″ made `symbols.enabled` tri-state so only a person enables a tool that
+ * reads a private codebase (D-4, F-2). The only way to decide was a prompt, and
+ * the runs that matter most have none: the self-build gate, CI, a background
+ * launch. gate-313 planned and ran with serena installed and undecided, and
+ * sent 80 symbol-level couplings to review while the tool that looks such
+ * names up stayed off in every session.
+ *
+ * "On" is honoured only when the probe finds the tool: `enabled: true` for a
+ * command that cannot run would be the silent failure S-3‴ exists to report,
+ * so it refuses and names the install instead, writing nothing. "Off" is the
+ * decline S-3″ honours absolutely.
+ */
+export function decideSymbols(
+  root: string,
+  decision: SymbolsDecision,
+  probe: (config: SymbolsConfig) => SymbolsStatus = probeSymbols,
+): { readonly ok: true; readonly enabled: boolean; readonly command: string } | { readonly ok: false; readonly message: string } {
+  const file = configFilePath(root);
+  const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+  /* The schema supplies `command` and `pinned` for a config that never mentioned symbols. */
+  const current = loadConfig(raw).config.symbols;
+  const symbols: SymbolsConfig = { command: current.command, pinned: current.pinned, enabled: decision === "on" };
+  if (decision === "on") {
+    const status = probe(symbols);
+    if (status.kind !== "ready") {
+      const reason = status.kind === "missing" ? status.reason : "not enabled";
+      return {
+        ok: false,
+        message: [
+          `--symbols asked for symbol intelligence, but \`${symbols.command}\` could not be run: ${reason}.`,
+          "Detent does not install tooling — it binds to what the machine has (D-4).",
+          `Install it yourself, pinned:   uv tool install -p 3.13 serena-agent==${symbols.pinned}`,
+          "Or pass --no-symbols to record the decline.",
+        ].join("\n"),
+      };
+    }
+  }
+  writeArtifact(root, "config.json", { ...raw, symbols });
+  return { ok: true, enabled: symbols.enabled === true, command: symbols.command };
 }

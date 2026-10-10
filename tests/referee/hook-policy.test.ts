@@ -1,12 +1,15 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readBindings } from "../../src/adapter/drift.js";
 import { HOOK_STAGE_FILE, HOOK_SURFACE_FILE, stateDir } from "../../src/fs/layout.js";
 import { ensureRunBranch, installTrailerHook } from "../../src/kernel/git.js";
 import { RUN_REFEED_TEXT } from "../../src/kernel/hook-policy.js";
+import { SPAWN_TOOLS } from "../../src/sessions/guard.js";
 import { RunJournal } from "../../src/kernel/journal.js";
 import { RefereeCore } from "../../src/kernel/referee.js";
+import type { ServedSession } from "../../src/kernel/referee-context.js";
 import { loadConfig } from "../../src/kernel/worstcase.js";
 import { callTool, isToolError, type RefereeToolError } from "../../src/referee/registry.js";
 import { MockBackend } from "../../src/sessions/mock.js";
@@ -30,7 +33,7 @@ afterEach(() => {
   for (const fn of cleanups.splice(0)) fn();
 });
 
-async function makeCore(): Promise<{ root: string; core: RefereeCore }> {
+async function makeCore(hookFiles = true, servedSession?: ServedSession): Promise<{ root: string; core: RefereeCore }> {
   const repo = await makeRunRepo();
   cleanups.push(() => removeTree(repo.root));
   const loaded = loadConfig(JSON.parse(readFileSync(path.join(stateDir(repo.root), "config.json"), "utf8")));
@@ -39,7 +42,7 @@ async function makeCore(): Promise<{ root: string; core: RefereeCore }> {
   const runBranch = ensureRunBranch(repo.root, "hook-policy");
   installTrailerHook(repo.root);
   const core = new RefereeCore(
-    { root: repo.root, backend: new MockBackend(), prompts: loadPromptSet(), now: () => NOW },
+    { root: repo.root, backend: new MockBackend(), prompts: loadPromptSet(), now: () => NOW, hookFiles, ...(servedSession === undefined ? {} : { servedSession }) },
     loaded,
     journal,
     runBranch,
@@ -62,7 +65,8 @@ describe("T-120/T-121 claim-scoped surface policy", () => {
     expect(policy["driver"]).toBe(true);
     expect(policy["ticket_id"]).toBe("t-1");
     expect(policy["surface"]).toEqual([]);
-    expect(policy["deny_tools"]).toEqual(["Task", "Agent", "TaskCreate"]);
+    /* D-28″ (PRDR-215): one list, both drivers — the file carries the guard's own constant. */
+    expect(policy["deny_tools"]).toEqual([...SPAWN_TOOLS]);
     const bound = readBindings(root).bindings.map((b) => b.resolved);
     expect(bound.length).toBeGreaterThan(0);
     expect(policy["deny_bash_containing"]).toEqual(bound);
@@ -105,6 +109,22 @@ describe("T-120 run-scoped re-feed", () => {
   });
 });
 
+describe("D-27‴ the stage file names the run's driver (PRDR-099)", () => {
+  it("in a claim's currency, with the session the referee serves", async () => {
+    const { root, core } = await makeCore(true, { session_id: "session-1", parents: [11, 22] });
+    addTicket(root, { id: "t-1" });
+    core.pool();
+    expect(readJson(stagePath(root))["driver"]).toEqual({ owner: "w1", pid: process.pid, host: hostname(), session_id: "session-1", parents: [11, 22] });
+  });
+
+  it("with no session tie when the composition root gave none", async () => {
+    const { root, core } = await makeCore();
+    addTicket(root, { id: "t-1" });
+    core.pool();
+    expect(readJson(stagePath(root))["driver"]).toEqual({ owner: "w1", pid: process.pid, host: hostname() });
+  });
+});
+
 describe("T-120 drift unwind clears both files", () => {
   it("a GATE_DRIFT halt sweeps claims AND the published policy", { timeout: 60_000 }, async () => {
     const { root, core } = await makeCore();
@@ -127,5 +147,24 @@ describe("T-120 drift unwind clears both files", () => {
     expect(String(swept["reason"])).toContain("re-baseline");
     expect(existsSync(surfacePath(root))).toBe(false);
     expect(existsSync(stagePath(root))).toBe(false);
+  });
+});
+
+describe("PRDR-104 the headless driver publishes no hook files", () => {
+  /**
+   * The files were written on both driver paths and read by whatever Claude
+   * session had the run root as its cwd: the operator monitoring a CLI run was
+   * told to drive a loop a Node process already owned, and denied every edit
+   * everywhere under D-27. The headless path has no model session to govern.
+   */
+  it("acquire and pool leave both files absent on the headless path", async () => {
+    const { root, core } = await makeCore(false);
+    addTicket(root, { id: "t1" });
+    expect(core.acquire("t1").ok).toBe(true);
+    expect(existsSync(surfacePath(root))).toBe(false);
+    core.pool();
+    expect(existsSync(stagePath(root))).toBe(false);
+    core.releaseTicket("t1");
+    expect(existsSync(surfacePath(root))).toBe(false);
   });
 });

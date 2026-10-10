@@ -16,12 +16,17 @@
     "prompts": "tsx scripts/hash-prompts.ts",
     "prompts:check": "tsx scripts/hash-prompts.ts --check",
     "plugin": "tsx scripts/build-plugin.ts",
-    "plugin:validate": "claude plugin validate --strict . && claude plugin validate --strict .claude-plugin/plugin.json && claude plugin validate --strict skills && claude plugin validate --strict agents"
+    "plugin:validate": "claude plugin validate --strict . && claude plugin validate --strict .claude-plugin/plugin.json && claude plugin validate --strict skills && claude plugin validate --strict agents",
+    "rules:check": "tsx scripts/check-rules.ts",
+    "tickets:check": "tsx scripts/check-tickets.ts",
+    "eval:build": "tsx scripts/eval-build.ts",
+    "eval:run": "tsx scripts/eval-run.ts",
+    "eval:score": "tsx scripts/eval-score.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.191",
+    "@anthropic-ai/claude-agent-sdk": "0.3.285",
     "@modelcontextprotocol/sdk": "1.30.0",
-    "picomatch": "4.0.3",
+    "picomatch": "4.0.5",
     "zod": "4.1.13"
   },
   "devDependencies": {

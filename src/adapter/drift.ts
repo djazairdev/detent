@@ -1,10 +1,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { parseArtifact } from "../schemas/common.js";
+import { recordApprovals } from "./approvals.js";
+import { SCHEMA_VERSION, parseArtifact } from "../schemas/common.js";
 import { bindingsFileSchema, type Binding, type BindingsFile } from "../schemas/records.js";
 import { stateDir, writeArtifact } from "../fs/layout.js";
+import { normalizeInvocation } from "./normalize.js";
 import type { Candidate, Discovery } from "./discover/types.js";
+import { ROOT_PACKAGE, comparePackages, gateLabel } from "./packages.js";
 import type { GateSlot } from "./run.js";
+import type { z } from "zod";
 
 /**
  * T-027 — drift halting (V-3) and the config-region comparison it rests on.
@@ -26,7 +30,7 @@ function bindingsPath(root: string): string {
 
 export function readBindings(root: string): BindingsFile {
   const file = bindingsPath(root);
-  if (!existsSync(file)) return { schema_version: 1, bindings: [], skips: [] };
+  if (!existsSync(file)) return { schema_version: SCHEMA_VERSION, packages: [ROOT_PACKAGE], bindings: [], skips: [] };
   const parsed = parseArtifact(bindingsFileSchema, JSON.parse(readFileSync(file, "utf8")));
   if (parsed.ok) return parsed.value;
   throw new Error(
@@ -36,13 +40,45 @@ export function readBindings(root: string): BindingsFile {
   );
 }
 
-export function writeBindings(root: string, file: Omit<BindingsFile, "schema_version">): void {
-  writeArtifact(root, BINDINGS_FILE, file);
+/**
+ * What a writer hands `writeBindings`. `packages` may be left out by a writer
+ * that binds the root alone; the file then names the root and every package a
+ * binding or skip names (V-5′).
+ */
+export type BindingsInput = Omit<z.input<typeof bindingsFileSchema>, "schema_version">;
+
+export function writeBindings(root: string, input: BindingsInput): void {
+  const named = [ROOT_PACKAGE, ...(input.bindings ?? []).map((b) => b.package ?? ROOT_PACKAGE), ...(input.skips ?? []).map((s) => s.package ?? ROOT_PACKAGE)];
+  const parsed = bindingsFileSchema.parse({ ...input, schema_version: SCHEMA_VERSION, packages: [...new Set([...(input.packages ?? []), ...named])].sort(comparePackages) });
+  writeArtifact(root, BINDINGS_FILE, { packages: parsed.packages, bindings: parsed.bindings, skips: parsed.skips });
+  /**
+   * V-3⁵ (PRDR-231): the ONE funnel. Every route that mints an approved binding
+   * — init's `bindAll`, both `verify sync` paths, C-4's bootstrap promotion, and
+   * the merge-time re-baseline — writes through here, so recording the approval
+   * here needs no optional dependency at any of them and none can forget.
+   */
+  recordApprovals(root, parsed.bindings, new Date().toISOString());
+}
+
+/**
+ * V-5′ (PRDR-295): what discovery finds today, in each package's own
+ * directory. A plain `Discovery` is the root's, as before packages; a package
+ * it does not hold is read as one where discovery finds nothing.
+ */
+export type Found = Discovery | ReadonlyMap<string, Discovery>;
+
+const NOTHING: Discovery = { schema_version: SCHEMA_VERSION, stack: { markers: [], pm: null }, candidates: [] };
+
+function discoveryOf(found: Found, pkg: string): Discovery {
+  if (found instanceof Map) return found.get(pkg) ?? NOTHING;
+  return pkg === ROOT_PACKAGE ? (found as Discovery) : NOTHING;
 }
 
 type DriftStatus = "clean" | "drifted" | "exempt" | "vanished";
 
 export interface DriftCheck {
+  /** V-5′ (PRDR-295): the package the binding runs in. */
+  readonly package: string;
   readonly slot: GateSlot;
   readonly status: DriftStatus;
   readonly stored_hash: string;
@@ -51,9 +87,9 @@ export interface DriftCheck {
   readonly message: string;
 }
 
-/** A stored binding matches the candidate that would be proposed for it today. */
-function currentFor(binding: Binding, discovery: Discovery): Candidate | undefined {
-  return discovery.candidates.find(
+/** A stored binding matches the candidate that would be proposed for it today, in its own package (V-5′). */
+export function currentFor(binding: Binding, found: Found): Candidate | undefined {
+  return discoveryOf(found, binding.package).candidates.find(
     (c) => c.slot === binding.slot && c.adapter === binding.adapter && c.ref === binding.ref,
   );
 }
@@ -62,48 +98,92 @@ function currentFor(binding: Binding, discovery: Discovery): Candidate | undefin
  * V-3: re-resolve and compare. `provisional` bindings are exempt — C-4 has not
  * finalised them yet, so there is no baseline to have drifted from.
  */
-export function checkBinding(binding: Binding, discovery: Discovery): DriftCheck {
+export function checkBinding(binding: Binding, discovery: Found): DriftCheck {
+  const label = gateLabel(binding);
+  /**
+   * PRDR-149: the command check runs for EVERY status, including provisional.
+   * The exemption below is right in its own terms — a provisional binding has
+   * no approved baseline, so it cannot have drifted FROM anything — but it was
+   * answering a second question it was never asked: whether the command is the
+   * one discovery found. It returned `exempt` before any comparison, `exempt`
+   * is not in the halting filter, and `runScopedGates` never looks at status,
+   * so one extra field in a committed `bindings.json` bypassed SEC-5′ whole.
+   */
+  const discovered = currentFor(binding, discovery);
+  if (discovered !== undefined && normalizeInvocation(discovered).command !== binding.resolved) {
+    return {
+      package: binding.package,
+      slot: binding.slot,
+      status: "drifted",
+      stored_hash: binding.config_hash,
+      current_hash: discovered.config_hash,
+      message:
+        `${label}: the bound COMMAND no longer matches what discovery finds — stored ` +
+        `\`${binding.resolved}\`, current \`${normalizeInvocation(discovered).command}\` ` +
+        `(${discovered.config_file}). Run \`detent verify sync\` to accept it.`,
+    };
+  }
+
   if (binding.status === "provisional") {
     return {
+      package: binding.package,
       slot: binding.slot,
       status: "exempt",
       stored_hash: binding.config_hash,
       current_hash: currentFor(binding, discovery)?.config_hash ?? null,
-      message: `${binding.slot}: provisional binding, exempt from drift until bootstrap ticket #1 finalises it (C-4).`,
+      message: `${label}: provisional binding, exempt from drift until bootstrap ticket #1 finalises it (C-4).`,
     };
   }
 
   const current = currentFor(binding, discovery);
   if (current === undefined) {
     return {
+      package: binding.package,
       slot: binding.slot,
       status: "vanished",
       stored_hash: binding.config_hash,
       current_hash: null,
       message:
-        `${binding.slot}: the configuration defining \`${binding.resolved}\` (${binding.adapter}:${binding.ref}) ` +
+        `${label}: the configuration defining \`${binding.resolved}\` (${binding.adapter}:${binding.ref}) ` +
         `no longer exists — verification changed, re-baseline with \`detent verify sync\`.`,
     };
   }
 
+  /**
+   * SEC-5′ (PRDR-134): compare the COMMAND, not only the configuration it came
+   * from. `resolved` is the only field that executes — `referee-gate.ts` hands
+   * it to `spawn(..., { shell: true })` with the operator's full environment —
+   * and it was never compared to what discovery currently produces, while the
+   * schema constrained it to any non-empty string. `config_hash` is not a
+   * secret: for node-scripts it is the sha256 of the literal
+   * `scripts.<name>=<body>` region, so a repository could ship an ordinary
+   * `package.json`, compute the hash that region yields, and commit a
+   * `bindings.json` pairing that VALID hash with `curl … | sh`. Drift reported
+   * clean and the first gate of `detent run` executed it.
+   *
+   * Checked before the hash so the message names the command, which is the
+   * thing an operator needs to see.
+   */
   if (current.config_hash !== binding.config_hash) {
     return {
+      package: binding.package,
       slot: binding.slot,
       status: "drifted",
       stored_hash: binding.config_hash,
       current_hash: current.config_hash,
       message:
-        `${binding.slot}: verification changed — re-baseline. Stored config_hash ${binding.config_hash}, ` +
+        `${label}: verification changed — re-baseline. Stored config_hash ${binding.config_hash}, ` +
         `current ${current.config_hash} (${current.config_file}). Run \`detent verify sync\` to accept it.`,
     };
   }
 
   return {
+    package: binding.package,
     slot: binding.slot,
     status: "clean",
     stored_hash: binding.config_hash,
     current_hash: current.config_hash,
-    message: `${binding.slot}: unchanged.`,
+    message: `${label}: unchanged.`,
   };
 }
 
@@ -112,7 +192,7 @@ export interface DriftReport {
   readonly halting: readonly DriftCheck[];
 }
 
-export function checkAll(bindings: readonly Binding[], discovery: Discovery): DriftReport {
+export function checkAll(bindings: readonly Binding[], discovery: Found): DriftReport {
   const checks = bindings.map((b) => checkBinding(b, discovery));
   return { checks, halting: checks.filter((c) => c.status === "drifted" || c.status === "vanished") };
 }
@@ -134,7 +214,7 @@ export class DriftHaltError extends Error {
  * that forgets to check a boolean runs the gate anyway, and SEC-5 does not
  * tolerate that failure mode.
  */
-export function assertNoDrift(bindings: readonly Binding[], discovery: Discovery): DriftReport {
+export function assertNoDrift(bindings: readonly Binding[], discovery: Found): DriftReport {
   const report = checkAll(bindings, discovery);
   if (report.halting.length > 0) throw new DriftHaltError(report.halting);
   return report;
@@ -144,11 +224,11 @@ export function assertNoDrift(bindings: readonly Binding[], discovery: Discovery
  * C-4: bootstrap ticket #1 passed, so greenfield bindings become the baseline.
  * The hash is taken from what exists *now* — that is what "baseline" means.
  */
-export function finalize(binding: Binding, discovery: Discovery): Binding {
+export function finalize(binding: Binding, discovery: Found): Binding {
   if (binding.status === "approved") return binding;
   const current = currentFor(binding, discovery);
   if (current === undefined) {
-    throw new Error(`cannot finalise ${binding.slot}: its defining configuration no longer exists`);
+    throw new Error(`cannot finalise ${gateLabel(binding)}: its defining configuration no longer exists`);
   }
   return { ...binding, status: "approved", config_hash: current.config_hash };
 }

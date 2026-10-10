@@ -1,17 +1,26 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import path from "node:path";
 import { readBindings } from "../adapter/drift.js";
-import type { PromptSet, SessionBackend } from "../sessions/backend.js";
+import { bindingsPreamble, type PromptSet, type SessionBackend } from "../sessions/backend.js";
 import type { State } from "../schemas/states.js";
 import type { Ticket } from "../schemas/ticket.js";
-import { git, resolveBaseRef, snapshotRefs, type RefSnapshot, type RunBranch } from "./git.js";
+import { git, gitCouldNotRun, resolveBaseRef, snapshotRefs, type RefSnapshot, type RunBranch } from "./git.js";
 import { reviewBasis } from "./review-scope.js";
 import { pidAlive } from "./tickets/mutations.js";
+import { allTickets } from "./tickets/readers.js";
+import { contractKey } from "../schemas/init.js";
+import { resolveOwner } from "../init/contracts.js";
+import { assertNoEditingTools, probeSymbols, symbolServerConfig, symbolToolNames, writeSymbolContext, type SymbolsConfig } from "../adapter/symbols.js";
 import { clearClaimPolicy, publishClaimPolicy, refreshRunRefeed } from "./hook-policy.js";
+import type { StageDriver } from "../fs/hook-files.js";
 import { type RunJournal, runsDir } from "./journal.js";
+import { ECOSYSTEMS, type Ecosystem } from "../adapter/install.js";
 import { SpendLedger } from "./ledger.js";
 import type { Budgets } from "../schemas/budgets.js";
 import type { LoadedConfig } from "./worstcase.js";
+import { SCHEMA_VERSION, STRUCTURAL_PROTECTED } from "../schemas/common.js";
+import { readRules } from "./rules.js";
 
 /**
  * The referee's shared ground (T-100): one context object carrying the wiring
@@ -81,7 +90,32 @@ export interface CoreOptions {
   readonly isAlive?: (pid: number) => boolean;
   /** B-2: per-ticket worktrees, merged `--no-ff` into the run branch on DONE. */
   readonly worktree?: boolean;
+  /** V-1⁗ (PRDR-211): the package ecosystems the adapter installs for before a gate; the table by default, a seam for tests. */
+  readonly ecosystems?: readonly Ecosystem[];
+  /** PRDR-221: readiness is a probe of the machine; a test decides the machine. */
+  readonly probeSymbols?: typeof probeSymbols;
+  /**
+   * PRDR-104: whether this referee publishes the plugin hook files
+   * (`active_surface.json`, `stage.json`). True on the plugin path, where the
+   * model session that owns the claim is the reader. The headless driver
+   * passes false: its loop is a Node process no hook can nudge, and the files
+   * landed on whatever Claude session had the run root as its cwd — denying
+   * the operator's edits and telling them to drive a loop already running.
+   */
+  readonly hookFiles?: boolean;
+  /**
+   * D-27‴ (PRDR-099): what ties this referee to the Claude session it serves,
+   * recorded in `stage.json` beside the referee's own owner, pid and host. The
+   * composition root reads it; absent, the Stop hook cannot tell that session
+   * from another and nudges as it did before.
+   */
+  readonly servedSession?: ServedSession;
+  /** X-1⁵ (PRDR-191): where the advisory total is said out loud, on this driver too. */
+  readonly announce?: (text: string) => void;
 }
+
+/** D-27‴ (PRDR-099): the session id Claude Code started the referee under, and the pids it runs under, the nearest first. */
+export type ServedSession = Pick<StageDriver, "session_id" | "parents">;
 
 export class RefereeContext {
   readonly root: string;
@@ -94,8 +128,16 @@ export class RefereeContext {
   readonly rulesText: string;
   readonly bindingsPreamble: string;
   readonly spend: SpendLedger;
+  /** PRDR-104: false on the headless driver path. */
+  readonly hookFiles: boolean;
+  /** D-27‴ (PRDR-099): who drives this run, as `stage.json` names it. */
+  readonly driver: StageDriver;
+  /** S-5⁸ (PRDR-328): when this run began, from which an earlier ticket's outcome counts. */
+  readonly startedAt: number;
   readonly refs: RefSnapshot;
   readonly baseRef: string | null;
+  /** V-1⁗ (PRDR-211): what the referee installs before running a gate, and never commits. */
+  readonly ecosystems: readonly Ecosystem[];
   private readonly workDirs = new Map<string, string>();
 
   constructor(
@@ -109,24 +151,65 @@ export class RefereeContext {
     this.prompts = opts.prompts;
     this.worker = opts.worker ?? "w1";
     this.now = opts.now ?? (() => Date.now());
+    this.ecosystems = opts.ecosystems ?? ECOSYSTEMS;
     this.isAlive = opts.isAlive ?? pidAlive;
+    this.probe = opts.probeSymbols ?? probeSymbols;
     this.worktree = opts.worktree === true;
     this.rulesText = readRules(opts.root);
-    const bindings = readBindings(opts.root).bindings;
-    this.bindingsPreamble = JSON.stringify(
+    this.bindingsPreamble = bindingsPreamble(readBindings(opts.root).bindings, this.loaded.config.protected);
+    /* X-1⁵ (PRDR-191): the breaker reads its own two ceilings, from the same config. */
+    this.spend = new SpendLedger(
+      opts.root,
+      journal,
+      this.budgets.run_spend_usd,
       {
-        bindings: Object.fromEntries(bindings.map((b) => [b.slot, b.resolved])),
-        protected: this.loaded.config.protected,
-        non_negotiables: "Only artifacts and exit codes count (P2).",
+        spend_without_progress_floor_usd: this.budgets.spend_without_progress_floor_usd,
+        spend_without_progress_multiple: this.budgets.spend_without_progress_multiple,
+        spend_without_progress_sessions: this.budgets.spend_without_progress_sessions,
       },
-      null,
-      2,
+      opts.announce,
     );
-    this.spend = new SpendLedger(opts.root, journal, this.budgets.run_spend_usd);
+    this.hookFiles = opts.hookFiles ?? true;
+    this.driver = { owner: this.worker, pid: process.pid, host: hostname(), ...opts.servedSession };
+    this.startedAt = this.now();
     /* P7: every ref except the run branch is protected ground for this run. */
     this.refs = snapshotRefs(opts.root);
     /* V-5: the run's baseline, resolved once; null falls back to root commands. */
     this.baseRef = resolveBaseRef(opts.root, runBranch);
+  }
+
+  /** S-3⁸ (PRDR-121): the symbol server a session may call, when one is configured and runnable. */
+  get symbols(): SymbolsConfig | undefined {
+    return this.loaded.config.symbols;
+  }
+
+  /**
+   * S-3⁸: the read tools a session may call, probed once per referee. Absent,
+   * disabled or unrunnable all yield none, and every stage runs as before.
+   */
+  symbolTools(): string[] {
+    if (this.symbolStatus().kind !== "ready") return [];
+    const tools = symbolToolNames();
+    /* SEC-3: refuses rather than trusts — an editing tool here is a containment hole. */
+    assertNoEditingTools(tools);
+    return tools;
+  }
+
+  /** PRDR-229: started on the session's WORK DIRECTORY — under B-2″ the worktree, the tree the session edits — never the root. */
+  symbolServer(workDir: string): Record<string, unknown> {
+    const status = this.symbolStatus();
+    if (status.kind !== "ready") return {};
+    /* PRDR-223: the server's surface is Detent's own context file, written before every launch. */
+    writeSymbolContext(this.root);
+    return { mcpServers: symbolServerConfig(this.symbols as SymbolsConfig, this.root, workDir) };
+  }
+
+  private symbolProbe: ReturnType<typeof probeSymbols> | null = null;
+  private readonly probe: typeof probeSymbols;
+
+  private symbolStatus(): ReturnType<typeof probeSymbols> {
+    this.symbolProbe ??= this.probe(this.symbols);
+    return this.symbolProbe;
   }
 
   get budgets(): Budgets {
@@ -152,20 +235,31 @@ export class RefereeContext {
   /* ---- D-21 hook policy (T-120/T-121): the referee is the only writer ---- */
 
   publishHookPolicy(ticketId: string): void {
+    if (!this.hookFiles) return;
     publishClaimPolicy(this.root, {
       ticketId,
-      protectedGlobs: this.loaded.config.protected,
+      /**
+       * SEC-3 (PRDR-172): the structural floor, which every other GuardPolicy
+       * construction site in production spreads in and this one did not.
+       * Inert today only by coincidence — the ambient hook's `driver: true`
+       * branch denies every path'd call before `protectedGlobs` is consulted —
+       * so relaxing that branch would silently leave `.git/**` and
+       * `node_modules/**` unprotected for this policy alone.
+       */
+      protectedGlobs: [...this.loaded.config.protected, ...STRUCTURAL_PROTECTED],
       gateCommands: readBindings(this.root).bindings.map((b) => b.resolved),
       expiresAtMs: this.now() + this.budgets.ticket_wall_clock_ms,
     });
   }
 
   clearHookPolicy(): void {
+    if (!this.hookFiles) return;
     clearClaimPolicy(this.root);
   }
 
   refreshRunRefeed(active: boolean): void {
-    refreshRunRefeed(this.root, active, this.now() + this.budgets.ticket_wall_clock_ms);
+    if (!this.hookFiles) return;
+    refreshRunRefeed(this.root, active, this.now() + this.budgets.ticket_wall_clock_ms, this.driver);
   }
 
   maybeArtifact(ticketId: string, name: string): unknown {
@@ -192,7 +286,7 @@ export class RefereeContext {
     try {
       const sha = git(workDir, "rev-parse", "HEAD").trim();
       mkdirSync(path.dirname(file), { recursive: true });
-      writeFileSync(file, `${JSON.stringify({ schema_version: 1, sha }, null, 2)}\n`);
+      writeFileSync(file, `${JSON.stringify({ schema_version: SCHEMA_VERSION, sha }, null, 2)}\n`);
     } catch {
       /* No HEAD yet (empty repo): diff falls back to HEAD-relative below. */
     }
@@ -246,7 +340,15 @@ export class RefereeContext {
         `The complete changed-file list follows; read files in the worktree for full content.]\n` +
         `${stat}\n${full.slice(-DIFF_BODY_CAP)}`
       );
-    } catch {
+    } catch (err) {
+      /**
+       * P7′ (PRDR-130): a diff that could not be COMPUTED is not an empty diff.
+       * This returned `""`, which is under the truncation cap, so the "never
+       * truncate silently" banner above never fired and the reviewer was asked
+       * to judge a ticket against nothing. Failing closed sends it to a human
+       * instead — we cannot review what we could not read.
+       */
+      if (gitCouldNotRun(err)) throw err;
       return "";
     }
   }
@@ -293,7 +395,65 @@ function untrackedAsDiff(workDir: string, names: readonly string[]): string {
   return out;
 }
 
-export function publicTicket(ticket: Ticket): Record<string, unknown> {
+/**
+ * A-1‴ (PRDR-120): the interface travels with the work.
+ *
+ * A session is handed the names its ticket OWNS, and for each name it leans
+ * on, the note written by the ticket that owns it — so the session building
+ * `t-016` reads "TerminalStates() = [failed, stopped], fixed by t-002" instead
+ * of inferring it and contradicting it. This is the context enhancement, and
+ * it comes from the plan rather than from a memory store: nothing to keep in
+ * sync, nothing that can drift.
+ */
+function contractInputs(ticket: Ticket, root: string | undefined): Record<string, unknown> {
+  const provides = ticket.provides.map((p) => ({ kind: p.kind, id: p.id, note: p.note }));
+  if (provides.length === 0 && ticket.consumes.length === 0) return {};
+  /**
+   * The same tie-break `applyContracts` used to bind the edge (A-1‴). These
+   * disagreed once — first-in-draft-order there, last-in-id-order here — so a
+   * consumer could be blocked on one provider and told to implement against
+   * another's contradicting note.
+   */
+  const claims = new Map<string, { ids: string[]; notes: Map<string, string> }>();
+  for (const other of root === undefined ? [] : allTickets(root)) {
+    if (other.id === ticket.id) continue;
+    for (const p of other.provides) {
+      const key = contractKey(p);
+      const entry = claims.get(key) ?? { ids: [], notes: new Map<string, string>() };
+      entry.ids.push(other.id);
+      entry.notes.set(other.id, p.note);
+      claims.set(key, entry);
+    }
+  }
+  const owners = new Map<string, { ticket: string; note: string }>();
+  for (const [key, entry] of claims) {
+    const owner = resolveOwner(entry.ids, ticket.id);
+    if (owner === undefined) continue;
+    const contested = entry.ids.length > 1 ? ` (contested: ${[...entry.ids].sort().join(", ")} all claim this name)` : "";
+    owners.set(key, { ticket: owner, note: `${entry.notes.get(owner) ?? ""}${contested}` });
+  }
+  const consumes = ticket.consumes.map((c) => {
+    const owner = owners.get(contractKey(c));
+    return owner === undefined
+      ? { kind: c.kind, id: c.id, owned_by: null, note: "" }
+      : { kind: c.kind, id: c.id, owned_by: owner.ticket, note: owner.note };
+  });
+  return {
+    ...(provides.length === 0 ? {} : { provides }),
+    ...(consumes.length === 0
+      ? {}
+      : {
+          consumes,
+          contract_instruction:
+            "`provides` are the names this ticket must bring into existence exactly as described — another ticket's work depends on them. " +
+            "`consumes` are names other tickets own; `note` is the owning ticket's own description of what the name means, and it is binding: " +
+            "implement against it rather than re-deciding it, and if it cannot be honoured say so rather than changing it silently.",
+        }),
+  };
+}
+
+/** `root` resolves the notes of the tickets this one consumes from; omitted, the names travel without them. */
+export function publicTicket(ticket: Ticket, root?: string): Record<string, unknown> {
   return {
     id: ticket.id,
     type: ticket.type,
@@ -301,6 +461,7 @@ export function publicTicket(ticket: Ticket): Record<string, unknown> {
     description: ticket.description,
     acceptance_criteria: ticket.acceptance_criteria,
     non_goals: ticket.non_goals,
+    ...contractInputs(ticket, root),
     surface: ticket.surface,
   };
 }
@@ -309,10 +470,4 @@ export function lastNote(ticket: Ticket): string {
   return ticket.notes.at(-1)?.text ?? "";
 }
 
-function readRules(root: string): string {
-  for (const name of ["AGENTS.md", "CLAUDE.md"]) {
-    const file = path.join(root, name);
-    if (existsSync(file)) return readFileSync(file, "utf8");
-  }
-  return "(no rules file)";
-}
+
