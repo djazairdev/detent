@@ -7,11 +7,12 @@ import { transitionLineSchema, ledgerRowSchema, type TransitionLine, type Ledger
 import { stateVersionRefusal } from "../kernel/migrate.js";
 
 /**
- * T-053 — `detent report`: all eight §14 metrics, computed from artifacts
+ * T-053 — `detent report`: every §14 metric, computed from artifacts
  * alone (N-5: transitions + ledger + journals reconstruct any run). The
  * metric key set is pinned against the PRD's own table by test, so a metric
  * added to §14 without a reporter fails CI — the check that would have caught
- * scope-canary going unreported.
+ * scope-canary going unreported. Seven since PRDR-337: N-7″ retired the
+ * self-build row with the gate, and its metric only ever read `not-yet-run`.
  */
 
 export const METRIC_KEYS = [
@@ -22,7 +23,6 @@ export const METRIC_KEYS = [
   "research_cache_hit_rate",
   "prompt_cache_read_rate",
   "crash_resume_correctness",
-  "self_build_gate",
 ] as const;
 
 type MetricKey = (typeof METRIC_KEYS)[number];
@@ -70,7 +70,6 @@ export function buildReport(root: string, opts: ReportOptions = {}): Report {
     research_cache_hit_rate: researchCacheHits(transitions),
     prompt_cache_read_rate: promptCacheReads(ledger),
     crash_resume_correctness: crashResume(root, tickets),
-    self_build_gate: { value: "not-yet-run", detail: "N-7 first green lands at M3; a release gate thereafter" },
   };
 }
 

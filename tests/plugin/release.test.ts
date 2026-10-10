@@ -163,6 +163,7 @@ describe("PRDR-336 the self-build is not a release requirement", () => {
       "tests/cli/init-symbols.test.ts": ["the self-build gate"],
       "tests/cli/doctor.test.ts": ["release-checklist item 5"],
       "tests/oracle/pin-parity.test.ts": ["item 5 puts"],
+      "tests/scripts/self-build-flags.test.ts": ["the permanent gate"],
     };
     for (const [file, phrases] of Object.entries(stated)) {
       const text = read(file).toLowerCase();

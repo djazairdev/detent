@@ -127,7 +127,7 @@ export async function doctor(root: string, deps: DoctorDeps = {}): Promise<Docto
           ? `pinned ${pinned} == installed ${installed}`
           : `MISMATCH: this project pins ${pinned}, this Detent ships ${installed} — the config was written by ` +
             "a different Detent build and `init` never rewrites it. Advisory (S-5): the lockfile pins the SDK " +
-            `exactly and the release shipping ${installed} passed the N-7 gate, so nothing refuses on this; set ` +
+            `exactly, so this Detent always runs ${installed} and nothing refuses on this; set ` +
             `pinned.agent_sdk to ${installed} once you have re-verified this project against it`,
     });
 

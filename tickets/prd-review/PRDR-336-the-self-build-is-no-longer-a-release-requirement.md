@@ -143,6 +143,15 @@ cost $598.36 across 303 sessions (`docs/implementation-plan-v3.md`, 3.0-16).
   - `tests/docs/prd-specification-phase.test.ts`: the N-7′ case reads N-7′'s pointer and a
     retired item 5.
 
+## Found after the merge
+
+The sweep that closed this ticket missed one doc-block. The header of
+`tests/scripts/self-build-flags.test.ts` still read "the permanent gate carries the tooling the runner
+has". The search had keyed on N-7 and self-build in file content, and that line has neither: the
+file's name says self-build, but its text does not. A sweep of `main` for gate phrasing found it
+after #25 merged. #26 fixes it and adds it to the pinned phrases, so there are now ten, in ten files.
+The pinned case failed before the fix (1 failed, 12 passed) and passes after it.
+
 ## Falsification
 
 Against HEAD `29fd0b5`, before any edit, the new and changed cases ran on the old text:
