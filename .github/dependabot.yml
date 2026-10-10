@@ -1,0 +1,12 @@
+# Dependabot opens a pull request each week when a GitHub Action has a new version
+# (docs: https://docs.github.com/code-security/dependabot). npm packages are pinned to exact
+# versions on purpose, so only their security updates come, from the organisation's settings.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
