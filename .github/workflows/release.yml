@@ -48,8 +48,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          PRS: ${{ steps.release.outputs.prs }}
         run: |
-          for branch in $(gh pr list --repo "$REPO" --state open --label 'autorelease: pending' --json headRefName --jq '.[].headRefName'); do
+          for branch in $(jq -r '.[].headBranchName' <<< "$PRS"); do
             gh workflow run ci.yml --repo "$REPO" --ref "$branch"
             gh workflow run pr-title.yml --repo "$REPO" --ref "$branch"
           done
