@@ -452,6 +452,19 @@ describe("PRDR-254 the agent-sdk pin reports, and reports to the right reader", 
   });
 
   /**
+   * PRDR-337: the advisory said the shipping release "passed the N-7 gate".
+   * 3.2.0 shipped without a self-build, and N-7″ retired the gate, so the row
+   * keeps only what holds: the lockfile pins the SDK, and what to set.
+   */
+  it("and claims no gate the release did not pass", async () => {
+    const root = await fixture();
+    const check = named(await doctor(root, { installedSdkVersion: () => "0.4.0" }), "agent-sdk-pin");
+    expect(check?.detail, "N-7″ retired the self-build").not.toMatch(/N-7|self-build/u);
+    expect(check?.detail, "what holds: the lockfile pins the SDK").toContain("the lockfile pins the SDK exactly");
+    expect(check?.detail, "and what to set once re-verified").toContain("set pinned.agent_sdk to 0.4.0");
+  });
+
+  /**
    * The guard, not a discovery: this passes on the tree before the fix too. It
    * exists so that gating the SDK pin — the alternative PRDR-254 rejects —
    * cannot happen quietly. A future gate fails here and its author has to go

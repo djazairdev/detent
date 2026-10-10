@@ -12,6 +12,7 @@ import { MockBackend } from "../../src/sessions/mock.js";
 import { loadPromptSet } from "../../src/sessions/prompts.js";
 import { removeTree } from "../helpers.js";
 import { addTicket, implementGreen, implementRed, makeRunRepo, noopFix, researchValid, reviewApprove } from "../kernel/run-fixture.js";
+import { definitionText } from "../docs/prd-marks.js";
 
 /**
  * T-053 — status/report and the §14 metrics (C-12, C-13).
@@ -27,16 +28,32 @@ afterEach(() => {
   for (const r of roots.splice(0)) removeTree(r);
 });
 
+/**
+ * PRDR-337: the §14 rows a v3 rule retires, each with the rule that says so.
+ * v2 stays frozen, so its table keeps the row, and v3 records the retirement:
+ * N-7″ retires the self-build row with the gate.
+ */
+const RETIRED: Readonly<Record<string, string>> = { "N-7 self-build gate": "N-7″" };
+
 describe("T-053 §14 enumeration (the metric key set equals the PRD table)", () => {
-  it("the reporter has exactly one key per §14 row — both directions", () => {
+  it("the reporter has exactly one key per §14 row a v3 rule has not retired — both directions", () => {
     const prd = readFileSync("detent-prd-v2.md", "utf8");
     const section = prd.slice(prd.indexOf("## 14. Metrics"), prd.indexOf("## 15. Risks"));
     const rows = section
       .split("\n")
-      .filter((l) => l.startsWith("| ") && !l.startsWith("| Metric") && !l.startsWith("|---"));
+      .filter((l) => l.startsWith("| ") && !l.startsWith("| Metric") && !l.startsWith("|---"))
+      .filter((l) => !Object.hasOwn(RETIRED, l.split("|")[1]?.trim() ?? ""));
     /** One reporter key per PRD row; adding a row without a key fails here. */
     expect(rows).toHaveLength(METRIC_KEYS.length);
-    expect(METRIC_KEYS).toHaveLength(8);
+    expect(METRIC_KEYS).toHaveLength(7);
+  });
+
+  it("each retired row is retired by a v3 rule that says so (PRDR-337)", () => {
+    const v3 = readFileSync("detent-prd-v3.md", "utf8");
+    for (const [row, mark] of Object.entries(RETIRED)) {
+      const rule = (definitionText(v3, mark)[0] ?? "").replace(/\s+/gu, " ");
+      expect(rule, `${mark} retires §14's "${row}" row`).toContain("§14's N-7 row is retired");
+    }
   });
 
   it("every §14 cell is non-empty (the markdown table lint the PRD's AC names)", () => {
@@ -86,7 +103,7 @@ describe("T-053 report computes from artifacts alone (N-5)", () => {
     expect(report.prompt_cache_read_rate.value).toBe(0);
     /** No crash was injected. */
     expect(report.crash_resume_correctness.value).toBeNull();
-    expect(report.self_build_gate.value).toBe("not-yet-run");
+    expect(Object.hasOwn(report, "self_build_gate"), "N-7″ retired §14's self-build row (PRDR-337)").toBe(false);
 
     const rendered = renderReport(report);
     for (const key of METRIC_KEYS) expect(rendered).toContain(key);

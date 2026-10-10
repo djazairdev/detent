@@ -2924,6 +2924,8 @@ the code does what the rules it amends describe, and each of those rules points 
   3.2.0 shipped with the gate waived; 3.1.0 is the last release a self-build certified (T-142).
   Until PRDR-337 lands, `detent doctor` still says the shipping release passed the gate, and
   `detent report` still reports a `self_build_gate` metric.
+  *Built by PRDR-337: `detent doctor`'s advisory no longer names the gate, and `detent report` no
+  longer reports the metric.*
 
 - **D-16′ (PRDR-336, 2026-10-10).** D-16 is withdrawn: the self-build is not a permanent release
   gate, and not a release gate at all (N-7″). The maintainer's decision.
