@@ -181,13 +181,14 @@ describe("PRDR-278 the PRD records the specification phase and planning on its p
     expect(CEILINGS.spec_validation_rounds.default, "the code's default is the PRD's (PRDR-284)").toBe(8);
   });
 
-  it("N-7 keeps the raw PRD and runs the phase headless, and the checklist records its duration and spend", () => {
+  it("N-7 keeps the raw PRD and runs the phase headless, and no checklist item waits for it since N-7″ (PRDR-336)", () => {
     const text = rule("N-7′");
     expect(text).toContain("`detent-prd-v3.md`");
     expect(text).toMatch(/headless/u);
-    const item5 = /\n5\. \*\*N-7[\s\S]*?(?=\n6\. )/u.exec(CHECKLIST)?.[0] ?? "";
-    expect(item5).toMatch(/duration/u);
-    expect(item5).toMatch(/spend/u);
+    expect(text, "N-7′ points to the rule that retired its checklist item").toContain("N-7″");
+    const item5 = /\n5\. \*\*[\s\S]*?(?=\n6\. )/u.exec(CHECKLIST)?.[0] ?? "";
+    expect(item5, "item 5 is retired").toMatch(/retired/iu);
+    expect(item5, "and records no run's duration or spend").not.toMatch(/wall-clock duration/u);
   });
 
   it("the planning redesign is recorded rule by rule", () => {

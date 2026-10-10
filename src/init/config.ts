@@ -111,7 +111,7 @@ export type SymbolsDecision = "on" | "off";
  *
  * S-3″ made `symbols.enabled` tri-state so only a person enables a tool that
  * reads a private codebase (D-4, F-2). The only way to decide was a prompt, and
- * the runs that matter most have none: the self-build gate, CI, a background
+ * the runs that matter most have none: the self-build, CI, a background
  * launch. gate-313 planned and ran with serena installed and undecided, and
  * sent 80 symbol-level couplings to review while the tool that looks such
  * names up stayed off in every session.

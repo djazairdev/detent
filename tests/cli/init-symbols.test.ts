@@ -10,7 +10,7 @@ import { gitInit, removeTree, tmpTree } from "../helpers.js";
  *
  * S-3″ made `symbols.enabled` tri-state so only a person decides, and the only
  * way to decide was a prompt at a TTY. The runs that matter most have none:
- * the self-build gate, CI, a background launch. gate-313 planned and ran with
+ * the self-build, CI, a background launch. gate-313 planned and ran with
  * serena installed and undecided, and sent 80 symbol-level couplings to review.
  * A flag is a person deciding, carried where a prompt cannot go.
  */

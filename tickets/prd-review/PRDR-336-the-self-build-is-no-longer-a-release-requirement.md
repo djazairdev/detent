@@ -1,7 +1,7 @@
 ---
 id: PRDR-336
 title: "The self-build is no longer a release requirement. N-7 made `detent init && detent run` on a folder holding only the PRD a gate on every version bump and every S-5 backend upgrade, and D-16 made the gate permanent. On 2026-10-10 the maintainer waived it for 3.2.0 and then retired it. The PRD records N-7″ and D-16′. The release checklist keeps item 5's number but no longer asks for a run. Every doc, doc-block and test that states the gate is updated to say what holds now"
-state: OPEN
+state: DONE
 severity: major
 category: decision
 labels: ["prd-review", "release", "N-7", "D-16", "user-decision", "N-6", "docs"]
@@ -100,3 +100,102 @@ cost $598.36 across 303 sessions (`docs/implementation-plan-v3.md`, 3.0-16).
    records the gap rather than closing it.
 6. **History keeps its text.** Closed tickets, the dated plans, the v2 PRD and the measurements
    "on the first self-build gate" describe what was true when they were written.
+
+## What changed
+
+- **`detent-prd-v3.md`.**
+  - Two dated bullets follow N-7′ in §4. **N-7″** says the self-build is not a release
+    requirement, that nothing waits for it, and that item 5 is retired with its number kept. It
+    says the harness and the `self-build` workflow stay for a maintainer to run, retires §14's
+    N-7 row, and names what stays until PRDR-337. **D-16′** withdraws D-16.
+  - Forward pointers sit at the end of N-7′, S-3⁗ and §13's MP4. The inheritance line names N-7″
+    for §12 and §14, and the decision log's opening lines name D-16′.
+  - The Status line says the gate was retired, and no longer cites item 5.
+- **`docs/release-checklist.md`.**
+  - Item 5 is "Retired: the N-7 self-build". It says when the self-build was retired and by what,
+    why the number stays, and that the workflow still runs it by hand.
+  - The title drops D-16, and the introduction names the porcelain freeze alone.
+  - Item 8 says the 3.1.1 line shipped as 3.2.0.
+- **`README.md`.** The N-7 badge is gone. The paragraph now says that every change to Detent
+  lands through a pull request that must pass its seven checks on Node 22 and 24, and that every
+  release walks the checklist.
+- **`docs/using-detent.md`.** The greenfield path is the one the self-build takes. It is no
+  longer called the permanent release gate.
+- **`docs/implementation-plan-v3.md`.** MP4 carries the retirement. The §5 changelog gains
+  3.0-35: 3.2.0, the retirement, and where the record has been kept since 3.0-34.
+- **Comments.**
+  - `release.yml` and `self-build.yml`.
+  - `scripts/self-build.ts`: its header, and S-3⁗'s note.
+  - `src/init/config.ts`, `src/schemas/records.ts` and `src/sessions/live.ts`: the builder's note,
+    and the SDK pin's argument.
+  - `tests/cli/init-symbols.test.ts`, `tests/cli/doctor.test.ts` and
+    `tests/oracle/pin-parity.test.ts`.
+
+  The SDK pin's argument now says that a release walks the checklist with the new SDK in its
+  lockfile, and that the vetting this gives is the checklist's gates, not a live session.
+- **Tests.**
+  - `tests/plugin/release.test.ts`:
+    - T-142 asserts the checklist's items and that the release pull request merges only on green.
+    - T-141 asserts the README's new statement.
+    - A PRDR-336 block pins the amendment, the forward pointers, the retired item 5 with items 6
+      to 8 keeping their numbers, the README and the guide, and nine phrases absent from the nine
+      files they stood in.
+  - `tests/docs/prd-specification-phase.test.ts`: the N-7′ case reads N-7′'s pointer and a
+    retired item 5.
+
+## Falsification
+
+Against HEAD `29fd0b5`, before any edit, the new and changed cases ran on the old text:
+
+    tests/docs/prd-specification-phase.test.ts  × N-7 keeps the raw PRD … no checklist item waits for it since N-7″
+    tests/plugin/release.test.ts                × says what Detent's own changes and releases pass
+                                                × the PRD defines N-7″ and D-16′ once each
+                                                × every v3 passage that stated the gate points forward
+                                                × the checklist asks for no self-build, and item 5 keeps its number, retired
+                                                × the README and the guide state no release gate
+                                                × no comment that stated the gate states it still
+    Test Files  2 failed (2)
+         Tests  7 failed | 38 passed (45)
+
+All seven passed after the change, together with `tests/docs/prd-requirement-ids.test.ts`: 3
+files, 58 tests.
+
+## Mutation battery
+
+Each mutant was applied to a snapshot copy of its file. The three docs tests were run, and the file
+was restored from the copy and checked with `cmp`.
+
+| Mutant | Result |
+|---|---|
+| M1 the README regains the N-7 badge | killed: the README and the guide |
+| M2 N-7′ loses its pointer | killed: the N-7′ case and the pointers case |
+| M3 N-7″ is defined twice | killed: `prd-requirement-ids.test.ts` and the definitions case |
+| M4 item 5 asks for the run again | killed: the checklist case |
+| M5 the list is renumbered and item 5 deleted | killed: the checklist case and the N-7′ case |
+| M6 `release.yml` says "no green, no release" again | killed: the comments case |
+| M7 `live.ts` rests the pin on item 5 again | killed: the comments case |
+| M8 the Status line cites item 5 again | killed: the pointers case |
+| M9 a blank line detaches S-3⁗'s pointer | killed: the pointers case |
+| M10 D-16′ is deleted | killed: the definitions case |
+
+## Gates
+
+- `npm run lint`, `typecheck`, `parity:check`, `prompts:check`, `rules:check` and
+  `tickets:check`: pass, on Node 22.23.2.
+- `npm run plugin`: it rewrote nothing. The src edits are doc-blocks, and the hook bundle carries
+  none.
+- `npm test`, once, on Node 22.23.2: 228 files, 2,544 passed and 2 skipped (2,546). That is the
+  five PRDR-336 cases more than before.
+
+## Recorded, not fixed
+
+- **No release step drives a live session through the agent SDK any more.** The self-build was the
+  only one. It ran `detent init && detent run` on the runtime the SDK bundles, so an SDK upgrade
+  was proven live before it shipped. The checklist's other live step, SEC-6, runs the `claude` on
+  PATH, not the runtime the SDK bundles. An SDK bump is now vetted by the gates alone, and the
+  sessions those gates run are mock sessions. If the maintainer wants a live check back, a cheap
+  one is `detent doctor --smoke` from a configured project, as part of item 6 or item 7. It runs
+  one smoke session through the live backend, so it spends a little. That choice is theirs.
+- **The 3.2.0 release notes cite items 5 to 8 by number.** Keeping the numbering keeps them true.
+- **The code still states the gate**, until PRDR-337 lands: `detent doctor`'s advisory and
+  `detent report`'s `self_build_gate`.

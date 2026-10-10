@@ -4,7 +4,6 @@
 [![release](https://img.shields.io/github/v/release/djazairdev/detent?display_name=tag&sort=semver)](https://github.com/djazairdev/detent/releases)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![node ≥ 22](https://img.shields.io/badge/node-%E2%89%A5%2022-brightgreen.svg)](.github/workflows/ci.yml)
-[![N-7 self-build](https://github.com/djazairdev/detent/actions/workflows/self-build.yml/badge.svg)](docs/release-checklist.md)
 [![Good first issues](https://img.shields.io/github/issues/djazairdev/detent/good%20first%20issue?label=good%20first%20issues&color=7057ff)](https://github.com/djazairdev/detent/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
 [![Improvements](https://img.shields.io/github/issues/djazairdev/detent/enhancement?label=improvements&color=a2eeef)](https://github.com/djazairdev/detent/issues?q=is%3Aissue+is%3Aopen+label%3Aenhancement+sort%3Areactions-%2B1-desc)
 
@@ -27,9 +26,9 @@ whichever way the plan was written.
 - **Per-ticket write containment**: a deny-enforced hook holds every session
   inside its ticket's declared surface; allow-rules cannot shadow it.
 
-Detent maintains itself under the same rules: the N-7 self-build gate,
-Detent building its own walking skeleton from its own PRD, is a permanent
-release requirement, not a demo.
+Detent is held to the standard it enforces: every change to Detent lands
+through a pull request that must pass its seven checks on Node 22 and 24, and
+every release walks [the release checklist](docs/release-checklist.md).
 
 Detent is built and maintained in Algeria, as part of [djazairdev](https://github.com/djazairdev).
 

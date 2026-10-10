@@ -1,4 +1,5 @@
-# T-140 — the N-7 self-build release gate (D-16), live half.
+# T-140 — the N-7 self-build, live half. No release waits for it since N-7″ (PRDR-336): run it
+# when you want evidence that Detent still builds its walking skeleton from its own PRD.
 #
 # workflow_dispatch ONLY, deliberately: the manual click plus the repo secret
 # ARE the R-10 consent — this workflow can never fire on push or schedule, so
