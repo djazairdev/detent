@@ -4,6 +4,15 @@ Every version bump and every pinned-backend upgrade (S-5) walks this list —
 in order, no skips. The porcelain freeze and the N-7 gate are the two items
 this file exists to make unskippable.
 
+The version bump is release-please's pull request, `chore(main): release
+X.Y.Z` ([`.github/workflows/release.yml`](../.github/workflows/release.yml)):
+it moves `package.json`, `package-lock.json`, `.claude-plugin/plugin.json` and
+`REFEREE_VERSION` together and writes `CHANGELOG.md`, from the titles of the
+pull requests merged since the last release. Walk this list on that pull
+request, and merge it only when every item is green: merging tags `vX.Y.Z` and
+publishes the release. A long-lived branch merged with a merge commit sets the
+version through its pull request's title (`feat: …` for a minor version).
+
 1. **Gates green on both Node lines.** `npm run parity:check`,
    `npm run prompts:check`, `npm run rules:check`, `npm run tickets:check`,
    `npm run lint`, `npm run typecheck`, `npm test` — locally and in CI
