@@ -14,7 +14,7 @@ import { ClaudeCodeBackend } from "./sdk.js";
  * T-140 — the live backend, constructed for a run (S-1…S-6, D-21).
  *
  * One builder shared by `detent run --backend claude` and the N-7 self-build
- * harness, so the verb and the release gate exercise the same wiring. The
+ * harness, so the verb and the self-build exercise the same wiring. The
  * construction-time policy is only the FALLBACK — every worker session
  * carries its per-ticket policy on its spec (S-2′), which the backend
  * prefers — and the Stop-gate accelerant runs the project's bound test
@@ -99,9 +99,12 @@ export const PIN_CHECK_SITES = {
  * like with nothing vetting it against Detent — the unvetted-backend case S-5's
  * "upgrades are PRs gated on the cross-ecosystem fixture suite" exists to
  * refuse. `agent_sdk` cannot move unless Detent moves, and Detent cannot ship
- * without `docs/release-checklist.md` item 5 putting the new SDK through the
- * N-7 self-build first. The vetting S-5 demands already happened, upstream, in
- * the release that shipped it; a project config re-litigating it adds nothing.
+ * a new SDK without walking `docs/release-checklist.md` with it in the
+ * lockfile. Whatever vetting S-5 demands happens there, upstream, in the
+ * release that ships it; a project config re-litigating it adds nothing. That
+ * vetting is the checklist's gates, not a live session: the N-7 self-build,
+ * which drove one through the SDK's bundled runtime, stopped being a release
+ * requirement on 2026-10-10 (N-7″, PRDR-336).
  *
  * Gating it anyway was considered and rejected: `ensureConfig` never rewrites
  * an existing config, so the first Detent upgrade would refuse every `run`,

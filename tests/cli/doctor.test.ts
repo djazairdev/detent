@@ -425,11 +425,12 @@ describe("PRDR-253 the pin gates the spend, it is not merely reported beside it"
 /**
  * PRDR-254: the agent-sdk pin is REPORTED, and deliberately refuses nothing.
  *
- * `pinned.agent_sdk` cannot move unless Detent moves, and every SDK bump goes
- * through the N-7 self-build before it ships (release-checklist item 5), so
- * S-5's vetting has already happened upstream by the time a project sees a
- * mismatch. Gating it would refuse every project initialised before a Detent
- * upgrade, because `ensureConfig` writes the pin once and never again.
+ * `pinned.agent_sdk` cannot move unless Detent moves, and every SDK bump ships
+ * only in a release that walked the release checklist with it in the lockfile,
+ * so S-5's vetting has already happened upstream by the time a project sees a
+ * mismatch. Since N-7″ (PRDR-336) that vetting is the checklist's gates, not a
+ * live self-build. Gating it would refuse every project initialised before a
+ * Detent upgrade, because `ensureConfig` writes the pin once and never again.
  *
  * Driven at `doctor()` rather than `main()`: the installed-SDK probe is a seam
  * on `DoctorDeps`, and `DoctorMainDeps` carries only `hasAuth`/`buildBackend`.

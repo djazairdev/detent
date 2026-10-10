@@ -18,8 +18,8 @@ frozen, and `detent init --replan` starts the next one.
 
 **New projects** need only a folder containing the planning document:
 Detent derives the stack, scaffolds through its own bootstrap ticket, and
-builds from nothing. That path is the permanent release gate: every Detent
-release must build Detent's own walking skeleton from its own PRD.
+builds from nothing. Detent's self-build takes the same path: it builds
+Detent's own walking skeleton from its own PRD.
 
 ## Your working tree
 

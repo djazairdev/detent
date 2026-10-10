@@ -5,8 +5,8 @@
 # titles, in Conventional Commits form) and keeps one pull request open, "chore(main): release
 # X.Y.Z": the version bump. It moves package.json, package-lock.json, .claude-plugin/plugin.json and
 # REFEREE_VERSION together (SEC-2) and writes CHANGELOG.md. The release checklist is walked on that
-# pull request (docs/release-checklist.md), and "no green, no release" (T-142) holds because the
-# ruleset requires CI on it. Merging it tags vX.Y.Z and publishes the GitHub release.
+# pull request (docs/release-checklist.md), and the ruleset requires CI on it, so it cannot merge red.
+# Merging it tags vX.Y.Z and publishes the GitHub release.
 #
 # Spends nothing by construction: no model credential is available here; R-10's spending consent
 # lives only in self-build.yml's manual dispatch.

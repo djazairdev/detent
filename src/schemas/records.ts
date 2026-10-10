@@ -174,7 +174,7 @@ export const ledgerRowSchema = z.strictObject({
    * PRDR-095: the model(s) that actually served the session, from the SDK's
    * per-model breakdown. Additive with a default, so rows written before this
    * field read back as `[]` rather than failing (the `cache_*` precedent).
-   * Without it a green N-7 gate cannot be audited for what produced it.
+   * Without it a green self-build cannot be audited for what produced it.
    */
   models: z.array(nonEmptyString).default([]),
   /**

@@ -4,7 +4,7 @@
 | Product | Detent: state-driven autonomous engineering, delivered as a Claude Code plugin |
 | Version | 3.2.0 |
 | Date | 2026-10-10 |
-| Status | Released — 3.2.0 ships the amendments this document marks 3.1.1, without the N-7 gate: the maintainer waived the self-build for this release on 2026-10-10, so no N-7 run certifies it (release checklist, item 5). 3.1.0 was certified by the N-7 gate on `detent-n7-310`, 67/67 DONE (T-142); draft line 3.0-draft.1…draft.6 closed by the N-7 green (T-140) |
+| Status | Released — 3.2.0 ships the amendments this document marks 3.1.1, without the N-7 gate: the maintainer waived the self-build for this release on 2026-10-10, so no N-7 run certifies it. The same day the self-build stopped being a release requirement (N-7″, D-16′, PRDR-336). 3.1.0 was the last release a self-build certified: the N-7 gate on `detent-n7-310`, 67/67 DONE (T-142); draft line 3.0-draft.1…draft.6 closed by the N-7 green (T-140) |
 | Implementation | TypeScript (public, open source) |
 | Supersedes | PRD v2.0-draft.7 (the CLI line; remains the reference for every section v3 inherits unchanged) |
 
@@ -48,7 +48,7 @@ P8 **Knowledge compounds.** Failure signatures, research briefs, and quarantine 
 P9 **Stale state is unconsumable.** Every checkpoint is content-addressed to its inputs; resume is a referee property, identical under either driver (D-30).
 
 ## Decision Log (v3 additions)
-D-1…D-25 carry forward from v2.0-draft.7. D-2, D-19, and D-22 are amended as below; P6 gains D-28.
+D-1…D-25 carry forward from v2.0-draft.7. D-2, D-19, and D-22 are amended as below; P6 gains D-28. D-16, the self-build as a permanent release gate, is withdrawn by D-16′ (PRDR-336, §4).
 
 | ID | Decision | Rationale (abridged) |
 |---|---|---|
@@ -1288,6 +1288,8 @@ D-1…D-25 carry forward from v2.0-draft.7. D-2, D-19, and D-22 are amended as b
   whichever the runner's probe supports, and says which, so the permanent gate carries the
   tooling the host has and its record shows it. Nothing is installed, and the read-only surface
   of an enabled session is unchanged (SEC-3).
+  *Amended by D-16′ (PRDR-336): the self-build is no longer a release gate. Its harness still
+  passes the flag the runner's probe supports, and says which.*
 
 - **A-1⁶ (3.1.1, PRDR-206).** The bootstrap ticket **provides the scaffold it creates**. C-4
   has Detent construct the bootstrap in greenfield and block every ticket on it; it declared no
@@ -2910,6 +2912,21 @@ the code does what the rules it amends describe, and each of those rules points 
   so release-checklist item 5 records its wall-clock duration and its spend, per phase, beside the
   green; the first such run gives specification decision 16 its projection. The N-7 scoping note
   (§13) still governs what the skeleton plans first.
+  *Amended by N-7″ (PRDR-336): the self-build is no longer a release requirement, so item 5 is
+  retired and records nothing. A run still reads and does what this rule says.*
+
+- **N-7″ (PRDR-336, 2026-10-10).** The self-build is not a release requirement. N-7 made it a gate
+  on every version bump and every pinned-backend upgrade (S-5); nothing waits for it now. The
+  release checklist keeps item 5's number, retired, so its other items keep theirs. The harness and
+  the `self-build` workflow stay, dispatch-only and capped, for a maintainer who wants evidence that
+  Detent still builds its walking skeleton from this document; such a run reads and does what N-7′
+  says. §14's N-7 row is retired with the gate. The maintainer decided this on 2026-10-10, the day
+  3.2.0 shipped with the gate waived; 3.1.0 is the last release a self-build certified (T-142).
+  Until PRDR-337 lands, `detent doctor` still says the shipping release passed the gate, and
+  `detent report` still reports a `self_build_gate` metric.
+
+- **D-16′ (PRDR-336, 2026-10-10).** D-16 is withdrawn: the self-build is not a permanent release
+  gate, and not a release gate at all (N-7″). The maintainer's decision.
 
 - **C-2⁹ (3.1.1, PRDR-279).** The conformance record lives at `docs/conformance.json`, and DISCOVER
   classifies every document set as raw, conforming or changed. This settles what C-2⁷ left to its
@@ -4155,6 +4172,7 @@ The v2 milestones (M0…M4) delivered the CLI line and its 52-test oracle parity
 - **MP2 — the model-driven loop.** `run` driven by the model over R-* tools; the D-28 budget hook; D-29 hook authority. *Exit:* a multi-ticket run completes under the model driver with byte-identical transitions to the headless driver, budgets provably hard (over-budget fixture routes to a human; ambient bypass denied).
 - **MP3 — init as a plugin.** The seven phases and five decisions surfaced as commands/skills/presented interrupts. *Exit:* the golden-path docs test passes against the plugin surface.
 - **MP4 — self-build + distribution (N-7).** The headless driver self-builds v3 in CI (the permanent gate, D-16); the plugin publishes to a marketplace. *Exit:* N-7 green on the v3 document; marketplace install smoke-tested.
+  *Amended by D-16′ (PRDR-336): the self-build is no longer a release gate. MP4's exit was met at 3.1.0 (T-142).*
 
 **N-7 scoping note (draft.4, raised by the self-build's own analyst — T-140).** The walking skeleton N-7 builds is the referee core and the headless driver (the MP0-equivalent of this document): a deterministic machine whose gates run green. The plugin shell and marketplace distribution are post-skeleton milestones; their platform-authoring and publish mechanics are plan-time research topics (C-3a) or later tickets' concerns, and are **never blocking questions for the skeleton plan** — an analyst reading this document should plan the skeleton first and defer those surfaces to their milestones.
 *Amended by C-3⁵ (3.1.1, PRDR-298): planning research is deleted, so those mechanics are later tickets' concerns.*
@@ -4167,6 +4185,6 @@ The following sections are **driver-agnostic** and are inherited from `detent-pr
 - **§5 Filesystem Contract (F)** — `.detent/` layout, the committed set, content-addressed checkpoints (F-4). **F-1′ (draft.4, PRDR-066/PRDR-064 applied):** the local set gains the two D-21 hook-policy files (`active_surface.json`, `stage.json` — run-level, never committed); and the plan directory is `plan/` (tickets `<ticket-id>.json`, plus the plan artifact `plan.json` and the approval record `approval.json`) — a file in `plan/` is a ticket **iff** its name is not one of the reserved names `plan.json` and `approval.json`; the reserved set is closed, and a reader that enumerates the directory asserts against it rather than carrying its own list. This is A-2's stated home, raised unprompted by the N-7 analyst reading this document (T-140).
 - **§6 Verification Adapter Contract (V)** — discovery, binding, execution, drift. V-5 is amended by V-5′ (3.1.1, PRDR-278): each package's gates are bound, as V-5″ (PRDR-295) builds.
 - **§7 Execution State Machine (X)** — the twenty states, the X-3 transition table, the escalation ladder, the budgets of X-1, `GATE_DRIFT` (D-23), attempt generations (D-17). The referee *is* this machine. Its twenty states are unchanged; its table, budgets and signals are amended by the dated `X-*` entries of §4, among them X-3′ (3.1.1, PRDR-278), which admits a false premise from the three fix states, and by C-12‴'s requeue rows.
-- **§9 Branch & Merge Contract (B)**, **§10 Artifacts (A)**, **§12 Non-Functional (N)** — including N-7 self-build, now naming `detent-prd-v3.md` as its target and running the specification phase headless (N-7′) — **§14 Metrics**, **§15 Risks**.
+- **§9 Branch & Merge Contract (B)**, **§10 Artifacts (A)**, **§12 Non-Functional (N)** — including N-7 self-build, now naming `detent-prd-v3.md` as its target and running the specification phase headless (N-7′), and no longer a release requirement (N-7″) — **§14 Metrics**, whose N-7 row N-7″ retires, **§15 Risks**.
 
 Where an inherited section says the CLI is the entry point, read "the headless driver or the plugin"; where it says "the kernel decides", read "the referee admits, the driver sequences" (D-27). An inherited requirement's *semantics* change only where a dated entry amends it by name; otherwise only the delivery surface and the loop's driver do.

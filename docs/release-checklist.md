@@ -1,8 +1,8 @@
-# Release checklist (C-14′, D-16)
+# Release checklist (C-14′)
 
 Every version bump and every pinned-backend upgrade (S-5) walks this list —
-in order, no skips. The porcelain freeze and the N-7 gate are the two items
-this file exists to make unskippable.
+in order, no skips. The porcelain freeze is the item this file exists to make
+unskippable.
 
 The version bump is release-please's pull request, `chore(main): release
 X.Y.Z` ([`.github/workflows/release.yml`](../.github/workflows/release.yml)):
@@ -12,6 +12,12 @@ pull requests merged since the last release. Walk this list on that pull
 request, and merge it only when every item is green: merging tags `vX.Y.Z` and
 publishes the release. A long-lived branch merged with a merge commit sets the
 version through its pull request's title (`feat: …` for a minor version).
+
+Walk the list on what will merge. release-please rebuilds its pull request
+only when the release notes change, so a commit that changes none, such as a
+`test:` or `docs:` one, leaves the pull request on its old base, and its log
+says the pull request "remained the same". Bring it up to date first with
+`gh pr update-branch <number> --rebase`; that push starts its checks.
 
 1. **Gates green on both Node lines.** `npm run parity:check`,
    `npm run prompts:check`, `npm run rules:check`, `npm run tickets:check`,
@@ -29,22 +35,13 @@ version through its pull request's title (`feat: …` for a minor version).
    `claude plugin install detent@detent` → both skills present, referee
    server `plugin:detent:referee` connects from a configured project → then
    uninstall. (First executed live at T-124; re-run per release.)
-5. **N-7 self-build green (D-16) — the permanent gate.** Dispatch the
-   `self-build` workflow with a spend cap: `detent init && detent run` on a
-   folder containing only `detent-prd-v3.md` must reach DONE on the walking
-   skeleton. Credentials: `ANTHROPIC_API_KEY` or, on a subscription plan,
-   `CLAUDE_CODE_OAUTH_TOKEN` minted with `claude setup-token` — either as a
-   repo secret. Locally, a logged-in claude CLI suffices. The harness passes
-   `--symbols` when the runner's serena probe is ready and `--no-symbols`
-   otherwise, and prints which (S-3⁗) — a gate on a runner with serena is the
-   one to trust for the symbol-level checks.
-   Record the self-build's wall-clock duration and its spend, per phase —
-   planning, and the four specification phases once PRDR-279 to PRDR-284
-   build them — beside the green (N-7′). The self-build will then run the
-   specification phase headless on the raw PRD, so it will take longer and
-   cost more; nothing caps either, and these figures say by how much.
-   No green, no release — every version bump and every S-5 backend upgrade
-   re-runs it.
+5. **Retired: the N-7 self-build.** It was a release gate until 2026-10-10,
+   when the maintainer retired it (N-7″, D-16′, PRDR-336); 3.1.0 is the last
+   release a self-build certified. Nothing on this list waits for it. The
+   number stays, so the items after it keep the numbers that code, tests and
+   release notes cite. The `self-build` workflow still runs it by hand, under a
+   cap you type, for anyone who wants that evidence; N-7′ says what a run reads
+   and does.
 6. **Version pins coherent (SEC-2/S-5).** `plugin.json` version equals
    `REFEREE_VERSION`; `pinned.agent_sdk` equals package.json's exact
    dependency; the backend pin is deliberate.
@@ -55,9 +52,9 @@ version through its pull request's title (`feat: …` for a minor version).
    bumped `schema_version` with a migration — never silently. A migration
    is an entry in `MIGRATIONS` (`src/kernel/migrate.ts`), tested by
    migrating a state written at the version before (F-3″).
-   The 3.1.1 line is one event, `schema_version` 1 to 2 (F-3″, PRDR-300):
-   each persisted shape it changes adds its step to that one migration
-   before the release (S-1‴), and none gets a version of its own.
+   The 3.1.1 line, released as 3.2.0, is one event, `schema_version` 1 to 2
+   (F-3″, PRDR-300): each persisted shape it changes adds its step to that
+   one migration before the release (S-1‴), and none gets a version of its own.
    The line also adds these shapes, each first written at 2 (C-2⁷,
    PRDR-279). A later change to any of them is an F-3 event:
    - the conformance record, `docs/conformance.json`, which a project

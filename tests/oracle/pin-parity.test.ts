@@ -75,11 +75,12 @@ describe("S-5 the pin check covers every spending entrypoint (ARCH-2)", () => {
  *
  * `pinned.claude_code` is gated on all four spending paths. `pinned.agent_sdk`
  * is gated on none, and that is deliberate: it cannot move unless Detent moves,
- * and `docs/release-checklist.md` item 5 puts every SDK bump through the N-7
- * self-build before it ships, so S-5's vetting has already happened upstream by
- * the time a project sees it. Gating it would refuse every project initialised
- * before a Detent upgrade, since `ensureConfig` never rewrites an existing
- * config.
+ * and every SDK bump ships only in a release that walked
+ * `docs/release-checklist.md` with it in the lockfile, so S-5's vetting has
+ * already happened upstream by the time a project sees it. Since N-7″
+ * (PRDR-336) that vetting is the checklist's gates, not a live self-build.
+ * Gating it would refuse every project initialised before a Detent upgrade,
+ * since `ensureConfig` never rewrites an existing config.
  *
  * Nothing said so, so PRDR-253's sweep read it as the gap PRDR-251 had just
  * closed three fields over. This is the claim, and this is its oracle.

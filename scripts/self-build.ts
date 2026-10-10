@@ -12,15 +12,17 @@ import { loadPromptSet } from "../src/sessions/prompts.js";
 import { git, gitInit } from "../tests/helpers.js";
 
 /**
- * T-140 — the N-7 self-build harness (D-16): `detent init && detent run` on a
+ * T-140 — the N-7 self-build harness: `detent init && detent run` on a
  * folder containing ONLY `detent-prd-v3.md`, to DONE on the walking skeleton.
+ * No release waits for it since N-7″ (PRDR-336); a maintainer runs it for the
+ * evidence that Detent still builds itself.
  *
  * The harness is the human's stand-in for exactly the acts N-7's folder needs
  * a human for: `git init` (the consent the CLI routes to the user today), the
  * spend cap (X-1's explicitly-chosen ceiling), and the approval relay
  * (`--approve --by n7-self-build` — MP3's T-131 channel, which is what makes
  * a scripted non-TTY self-build possible at all). Every OTHER decision that
- * fires is an honest red: the gate reports the interrupt and stops.
+ * fires is an honest red: the run reports the interrupt and stops.
  *
  * `--dry-run` exercises the entire harness up to the R-10 key gate with the
  * key deliberately withheld, so CI's regular suite can prove the wiring
@@ -30,7 +32,7 @@ import { git, gitInit } from "../tests/helpers.js";
  */
 
 /**
- * S-3⁗ (PRDR-208): the permanent gate carries the tooling the runner has. A
+ * S-3⁗ (PRDR-208): the self-build carries the tooling the runner has. A
  * flag is a person deciding — the harness author, for the runner it runs on —
  * where a TTY prompt cannot reach. Ready means `--symbols`; anything else,
  * including a tool that is installed but cannot run, means `--no-symbols`.
