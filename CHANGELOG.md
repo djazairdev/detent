@@ -4,6 +4,13 @@ What changes in each version, newest first. The versions follow [semantic versio
 
 [release-please](https://github.com/googleapis/release-please) writes the entries from the titles of merged pull requests, so don't edit this file by hand. Each release walks [the release checklist](docs/release-checklist.md). Versions up to 3.1.0 are on the [releases page](https://github.com/djazairdev/detent/releases).
 
+## [3.2.1](https://github.com/djazairdev/detent/compare/v3.2.0...v3.2.1) (2026-10-10)
+
+
+### Bug Fixes
+
+* doctor and report stop stating the retired N-7 gate ([#26](https://github.com/djazairdev/detent/issues/26)) ([428da6d](https://github.com/djazairdev/detent/commit/428da6d136a9ec02192e245085ffb913e1935cb9))
+
 ## [3.2.0](https://github.com/djazairdev/detent/compare/v3.1.0...v3.2.0) (2026-10-10)
 
 
