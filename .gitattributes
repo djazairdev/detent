@@ -1,0 +1,7 @@
+# Line endings are LF in the repository whatever the contributor's system.
+* text=auto eol=lf
+
+# Windows scripts keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

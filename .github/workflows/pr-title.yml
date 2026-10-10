@@ -1,0 +1,39 @@
+# Checks that a pull request's title is a Conventional Commit, such as "fix: wrong code for Adrar"
+# or "feat(api): add postal codes" (starters/release-please/README.md). Pull requests are
+# squash-merged, so the title becomes the commit's message. From the djazairdev project template.
+name: PR title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  workflow_dispatch:           # the release workflow starts it on the release pull request
+
+permissions:
+  contents: read
+
+jobs:
+  title:
+    name: PR title
+    # Started by hand there's no pull request to check: the job is skipped, which passes.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+          title = os.environ['TITLE']
+          types = 'feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert'
+          if re.fullmatch(rf'(?:{types})(?:\([\w./-]+\))?!?: \S.*', title):
+              print(f'OK: {title}')
+              sys.exit(0)
+          print(f'The title "{title}" is not a Conventional Commit. Start it with a type and a colon, e.g.:\n'
+                '  fix: wrong code for Adrar          (a bug fix: patch version)\n'
+                '  feat: add postal codes             (a new feature: minor version)\n'
+                '  feat!: rename the code field       (a breaking change: major version)\n'
+                '  docs: explain the transition       (no new version)\n'
+                f'Types: {types.replace("|", ", ")}. Edit the title; the check runs again.')
+          sys.exit(1)
+          PY
