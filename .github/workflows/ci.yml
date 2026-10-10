@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:   # release.yml starts it on the release pull request
 
+# The jobs only read the repository (CodeQL: actions/missing-workflow-permissions).
+permissions:
+  contents: read
+
 jobs:
   verify:
     runs-on: ubuntu-latest
