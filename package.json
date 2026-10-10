@@ -25,7 +25,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.285",
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "picomatch": "4.0.5",
     "zod": "4.1.13"
   },
@@ -38,6 +38,6 @@
     "tsx": "^4.23.12",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.18.1",
-    "vitest": "^3.0.0"
+    "vitest": "^5.0.3"
   }
 }
