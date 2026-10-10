@@ -13,6 +13,12 @@ request, and merge it only when every item is green: merging tags `vX.Y.Z` and
 publishes the release. A long-lived branch merged with a merge commit sets the
 version through its pull request's title (`feat: …` for a minor version).
 
+Walk the list on what will merge. release-please rebuilds its pull request
+only when the release notes change, so a commit that changes none, such as a
+`test:` or `docs:` one, leaves the pull request on its old base, and its log
+says the pull request "remained the same". Bring it up to date first with
+`gh pr update-branch <number> --rebase`; that push starts its checks.
+
 1. **Gates green on both Node lines.** `npm run parity:check`,
    `npm run prompts:check`, `npm run rules:check`, `npm run tickets:check`,
    `npm run lint`, `npm run typecheck`, `npm test` — locally and in CI
