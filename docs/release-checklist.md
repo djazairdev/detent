@@ -10,7 +10,10 @@ it moves `package.json`, `package-lock.json`, `.claude-plugin/plugin.json` and
 `REFEREE_VERSION` together and writes `CHANGELOG.md`, from the titles of the
 pull requests merged since the last release. Walk this list on that pull
 request, and merge it only when every item is green: merging tags `vX.Y.Z` and
-publishes the release. A long-lived branch merged with a merge commit sets the
+publishes the release. release-please opens it as `github-actions[bot]`, so
+GitHub holds its CI and title runs until a maintainer approves them: select
+*Approve workflows to run* in its merge box. Its runs wait again each time
+release-please updates it. A long-lived branch merged with a merge commit sets the
 version through its pull request's title (`feat: …` for a minor version).
 
 Walk the list on what will merge. release-please rebuilds its pull request

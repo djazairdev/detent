@@ -6,7 +6,6 @@ name: PR title
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
-  workflow_dispatch:           # the release workflow starts it on the release pull request
 
 permissions:
   contents: read
@@ -14,8 +13,6 @@ permissions:
 jobs:
   title:
     name: PR title
-    # Started by hand there's no pull request to check: the job is skipped, which passes.
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Check the title
