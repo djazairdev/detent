@@ -3,6 +3,11 @@
   "version": "3.2.1",
   "private": true,
   "description": "State-driven autonomous engineering CLI",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/djazairdev/detent.git"
+  },
   "type": "module",
   "engines": {
     "node": ">=22"
