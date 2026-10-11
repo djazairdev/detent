@@ -17,6 +17,7 @@ import {
   appliesAll,
   byRound,
   clean,
+  declaring,
   finding,
   initThroughValidate,
   record,
@@ -197,6 +198,8 @@ describe("PRDR-284: a default VALIDATE's writer adds is vetoable at PRESENT (C-3
             t.includes(`| ${id} |`) ? t : t.replace(/(\| X-\d+ \|[^\n]*\n)(?![\s\S]*\| X-\d+ \|)/u, `$1| ${id} | A loan is late one day past its due date. | The documents imply it. |\n`),
           [LENDING_PRD]: (t) => t.replace(/until the tool is back \(([^)]*)\)/u, (_m, ids: string) => `until the tool is back (${ids}, ${id})`),
         },
+        /* PRDR-342: declared, as a default WRITE adds is (C-3⁶). */
+        artifact: declaring(inputs, id),
       };
     });
     const first = await init(root, { reviewers: r, writer: w });

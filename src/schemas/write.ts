@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { SCHEMA_VERSION, nonEmptyString } from "./common.js";
-import { decideOptionSchema, touchSchema } from "./decide.js";
+import { askedOptionSchema, declaredDefaultSchema } from "./decide.js";
 import { QUESTION_ID } from "./founder-questions.js";
 
 /**
@@ -31,11 +31,11 @@ export const writeArtifactSchema = z.strictObject({
         id: z.string().regex(QUESTION_ID, "a question's id is Q-n"),
         question: nonEmptyString,
         why_asked: nonEmptyString,
-        options: z.array(decideOptionSchema.omit({ stack: true })).min(2, "offers fewer than two options"),
+        options: z.array(askedOptionSchema).min(2, "offers fewer than two options"),
       }),
     )
     .default([]),
   /** C-3⁶ (PRDR-341): each default WRITE added to the log, declared as DECIDE declares one: what settles it, and the founder decisions it touches. */
-  defaults: z.array(z.strictObject({ id: nonEmptyString, basis: nonEmptyString, touches: z.array(touchSchema).default([]) })).default([]),
+  defaults: z.array(declaredDefaultSchema).default([]),
 });
 export type WriteArtifact = z.infer<typeof writeArtifactSchema>;

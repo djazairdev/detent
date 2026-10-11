@@ -8,6 +8,7 @@ import { SCHEMA_VERSION, sha256Hex } from "../schemas/common.js";
 import { reviewFindingSchema, type ReviewFinding } from "../schemas/validate.js";
 import type { ScratchGrant } from "../sessions/sandbox.js";
 import { inBatches } from "./batches.js";
+import { reviewerQuestions } from "./validate-asks.js";
 import { contentsDigest } from "./machine.js";
 import { reviewArea, type ReviewTask, type RoundDeps } from "./validate-round.js";
 import type { Area } from "./validate-scope.js";
@@ -79,10 +80,14 @@ export function dropKeptReviews(root: string): void {
  * them, so a review kept under one setting is not taken under the other. A
  * reviewer that reads them is keyed as before, so the keys of every review
  * kept, and of N-8's set, still hold.
+ *
+ * C-2²⁹ (PRDR-342): the founder's questions, which a reviewer reads with the
+ * foundations, where any are asked, so a key made before any was asked holds.
  */
 export function reviewKey(root: string, round: number, task: ReviewTask, prompt: string, foundations: "read" | "given" = "read"): string {
   const files = [...task.foundations, ...task.documents, ...(task.diff === null ? [] : [task.diff])];
-  const given = [round, task.area.name, task.foundations, task.documents, task.heuristic, task.previous, task.diff, prompt, contentsDigest(root, files)];
+  const asked = reviewerQuestions(root);
+  const given = [round, task.area.name, task.foundations, task.documents, task.heuristic, task.previous, task.diff, prompt, contentsDigest(root, files), ...(asked.length === 0 ? [] : [asked])];
   return createHash("sha256")
     .update(JSON.stringify(foundations === "given" ? [...given, "foundations given"] : given))
     .digest("hex");

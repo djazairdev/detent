@@ -18,6 +18,7 @@ import { launchInitSession, withInitJournal } from "./session.js";
 import { countsOf, mergeFindings, type Finding, type Outcome } from "./validate-checks.js";
 import { dropKeptReviews, reviewRound, type KeptRoundDeps } from "./validate-kept.js";
 import { diffPath, fixFindings, writerBatches, type Fixed } from "./validate-fix.js";
+import { chainsOf, counted, questionOf, type Link } from "./validate-asks.js";
 import type { ReviewTask, Shown } from "./validate-round.js";
 import { offeredNote, withRoundScratch } from "./validate-scratch.js";
 import { areaOf, areasOf, reviewable, scopeOf, type Area } from "./validate-scope.js";
@@ -103,7 +104,9 @@ function startOf(deps: ValidateStageDeps, record: ConformanceRecord): Start | "c
     return { rounds: [], seeds, previous: null, diff: null };
   }
   const anything = edited.length + moved.removed.length > 0;
-  const met = last.counts.blocker + last.counts.major === 0;
+  /* C-2²⁹ (PRDR-342): what waits on the founder's answer does not count for the stop rule. */
+  const waiting = last.open.filter((o) => o.severity !== "minor" && questionOf(o.reason) !== null).length;
+  const met = last.counts.blocker + last.counts.major - waiting === 0;
   if (!anything && (met || record.rounds.length >= deps.ceiling)) return "concluded";
   const kept = diffPath(`round ${String(last.round)}`);
   return {
@@ -221,6 +224,12 @@ async function loop(deps: ValidateStageDeps, start: Start): Promise<PhaseOutcome
   let previous = start.previous;
   let diff = start.diff;
   let sandbox: Sandbox | null = null;
+  /*
+   * C-2²⁹ (PRDR-342): each finding's chain back to the first round's, which a
+   * repeated blocker's question lists. The record keeps no chain, so one that
+   * carries on from a stopped validation starts at its last round's findings.
+   */
+  let lineage = new Map<string, Link[]>((previous ?? []).map((p) => [p.id, [{ id: p.id, file: p.places[0]?.file ?? "", line: p.places[0]?.line ?? 0 }]]));
   for (let r = rounds.length + 1; ; r += 1) {
     const { docs, areas, tasks } = roundTasks(deps.root, deps.greenfield, seeds, previous, diff);
     if (tasks.length === 0) {
@@ -236,11 +245,13 @@ async function loop(deps: ValidateStageDeps, start: Start): Promise<PhaseOutcome
     const reported = await withRoundScratch(deps.root, r, sandbox, deps.note, async (scratch) => await reviewRound(deps, r, tasks, areas, docs.filter(reviewable), scratch));
     const findings = mergeFindings(r, reported);
     const counts = countsOf(findings);
+    const { chains, marked } = chainsOf(findings, lineage, new Map((previous ?? []).map((p) => [p.id, p.severity])));
+    const toFix = findings.map(({ id, severity, category, places, why, fix }) => ({ id, severity, category, places, why, fix, ...(marked.has(id) ? { ask: true, chain: marked.get(id) } : {}) }));
     const fixed: Fixed =
-      findings.length === 0
-        ? { outcome: new Map(), changed: [], diff: null, stood: true }
-        : await fixFindings(deps, `round ${String(r)}`, writerBatches(findings.map(({ id, severity, category, places, why, fix }) => ({ id, severity, category, places, why, fix }))), "review");
-    const ends = counts.blocker + counts.major === 0;
+      findings.length === 0 ? { outcome: new Map(), changed: [], diff: null, stood: true } : await fixFindings(deps, `round ${String(r)}`, writerBatches(toFix), "review");
+    /* C-2²⁹: the stop rule counts what Detent can fix; the ceiling still bounds the rest (specification decision 3). */
+    const ends = counted(findings, fixed.outcome).length === 0;
+    lineage = chains;
     const open = openOf(findings, fixed.outcome, r >= deps.ceiling);
     rounds.push({ round: r, counts, open, changed: [...fixed.changed] });
     save(deps, rounds, false);
@@ -249,7 +260,8 @@ async function loop(deps: ValidateStageDeps, start: Start): Promise<PhaseOutcome
     const left = (kind: Outcome["left"]) => [...fixed.outcome.values()].filter((o) => o.left === kind).length;
     deps.note?.(
       `VALIDATE round ${String(r)}: ${plural(findings.length, "finding")} (${String(counts.blocker)} blocker, ${String(counts.major)} major, ` +
-        `${String(counts.minor)} minor); ${String(left("applied"))} fixed, ${String(left("declined"))} declined, ${String(left("undone"))} undone (C-2¹⁴)`,
+        `${String(counts.minor)} minor); ${String(left("applied"))} fixed, ${String(left("declined"))} declined, ${String(left("undone"))} undone, ` +
+        `${String([...fixed.outcome.values()].filter((o) => questionOf(o.reason) !== null).length)} waiting on the founder (C-2¹⁴, C-2²⁹)`,
     );
     if (ends) return finished(deps, rounds, { ran: true });
     if (r >= deps.ceiling) return conclude(deps, rounds);
@@ -267,7 +279,8 @@ const save = (deps: ValidateStageDeps, rounds: readonly Round[], validated: bool
 /** At the ceiling: a blocker stops `init` here; majors go on to PRESENT as risks (specification decision 13). */
 function conclude(deps: ValidateStageDeps, rounds: readonly Round[]): PhaseOutcome {
   const last = rounds.at(-1);
-  const blockers = (last?.open ?? []).filter((o) => o.severity === "blocker");
+  /* C-2²⁹ (PRDR-342): a blocker that waits on the founder's answer is a question, which stops nothing here. */
+  const blockers = (last?.open ?? []).filter((o) => o.severity === "blocker" && questionOf(o.reason) === null);
   if (blockers.length === 0) return finished(deps, rounds, { ran: true });
   const stopped = last?.round ?? 0;
   return {

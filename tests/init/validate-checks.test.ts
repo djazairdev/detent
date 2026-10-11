@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { checkReview, countsOf, fixIssues, mergeFindings, outcomes } from "../../src/init/validate-checks.js";
+import { checkReview, countsOf, mergeFindings, outcomes } from "../../src/init/validate-checks.js";
+import { accountIssues } from "../../src/init/validate-asks.js";
 import { fixSkeleton, reviewSkeleton } from "../../src/init/validate-round.js";
 import { SCHEMA_VERSION } from "../../src/schemas/common.js";
 import { fixArtifactSchema, reviewArtifactSchema, type ReviewFinding } from "../../src/schemas/validate.js";
@@ -109,7 +110,16 @@ describe("PRDR-284: a round's findings, numbered once each", () => {
 });
 
 describe("PRDR-284: the writer accounts for every finding it was given", () => {
-  const account = (applied: string[], declined: { id: string; reason: string }[] = []) => ({ schema_version: SCHEMA_VERSION as typeof SCHEMA_VERSION, applied, declined });
+  const account = (applied: string[], declined: { id: string; reason: string }[] = []) => ({
+    schema_version: SCHEMA_VERSION as typeof SCHEMA_VERSION,
+    applied,
+    declined,
+    asked: [],
+    attached: [],
+    defaults: [],
+  });
+  /* PRDR-342: the account is `accountIssues`', which takes asked and attached findings as well (C-2²⁹). */
+  const fixIssues = (artifact: ReturnType<typeof account>, ids: string[]): string[] => accountIssues(artifact, ids, new Set(), { schema_version: SCHEMA_VERSION, questions: [] });
 
   it("takes each id once, in applied or declined", () => {
     expect(fixIssues(account(["R1-1"], [{ id: "R1-2", reason: "no defect" }]), ["R1-1", "R1-2"])).toEqual([]);
@@ -119,7 +129,7 @@ describe("PRDR-284: the writer accounts for every finding it was given", () => {
     expect(fixIssues(account(["R1-1", "R1-1", "R9-9"]), ["R1-1", "R1-2"])).toEqual([
       "R1-1 is listed twice",
       "R9-9 is not one of the findings you were given",
-      "R1-2 is listed in neither applied nor declined",
+      "R1-2 is listed in none of applied, declined, asked and attached",
     ]);
     expect(fixIssues(account(["R1-1"], [{ id: "R1-1", reason: "r" }]), ["R1-1"])).toEqual(["R1-1 is listed twice"]);
   });
@@ -137,5 +147,8 @@ describe("PRDR-284: the writer accounts for every finding it was given", () => {
   it("gives each session a skeleton its schema takes, so the two cannot drift", () => {
     expect(reviewArtifactSchema.safeParse(reviewSkeleton()).success).toBe(true);
     expect(fixArtifactSchema.safeParse(fixSkeleton()).success).toBe(true);
+    /* PRDR-342: with a question open, its `attached` names it, and still parses (C-2²⁹). */
+    expect(fixArtifactSchema.safeParse(fixSkeleton(["Q-2"])).success).toBe(true);
+    expect((fixSkeleton(["Q-2"])["attached"] as { question: string }[]).map((a) => a.question)).toEqual(["Q-2"]);
   });
 });

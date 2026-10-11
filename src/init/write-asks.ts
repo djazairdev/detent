@@ -43,7 +43,7 @@ export function questionIssues(artifact: WriteArtifact, record: QuestionsRecord)
  * one that changes a founder decision, and a declaration of a default the log
  * does not gain. Each refusal names its default.
  */
-export function refusedDefaults(artifact: WriteArtifact, added: readonly string[]): { readonly ids: string[]; readonly issues: string[] } {
+export function refusedDefaults(artifact: Pick<WriteArtifact, "defaults">, added: readonly string[]): { readonly ids: string[]; readonly issues: string[] } {
   const declared = new Map(artifact.defaults.map((d) => [d.id, d]));
   const ids: string[] = [];
   const issues: string[] = [];

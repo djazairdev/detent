@@ -6,7 +6,7 @@ import { loadPromptSet } from "../../src/sessions/prompts.js";
 import { repo } from "./plan-fixture.js";
 import type { Json } from "./decide-fixture.js";
 import { LENDING, PACK, RAW, WROTE, read, write } from "./write-fixture.js";
-import { LATE_RULE, LENDING_PRD, appliesAll, byRound, clean, finding, initThroughValidate, record, review, reviewers, writer } from "./validate-fixture.js";
+import { LATE_RULE, LENDING_PRD, appliesAll, byRound, clean, declaring, finding, initThroughValidate, record, review, reviewers, writer } from "./validate-fixture.js";
 
 /**
  * PRDR-284 — VALIDATE's writer and what code checks of every VALIDATE
@@ -131,7 +131,8 @@ describe("PRDR-284: what the writer leaves open (C-2¹⁴)", () => {
     const root = repo(RAW);
     const w = writer(() => ({ edit: { [LENDING_PRD]: (t) => `${t}\n` }, artifact: account([]) }));
     await initThroughValidate(root, { reviewers: lendingOnce(), writer: w });
-    expect((w.inputs[1]?.["previous_attempt"] as Json)["issue"]).toBe("R1-1 is listed in neither applied nor declined");
+    /* PRDR-342: an asked or attached finding is accounted for too (C-2²⁹). */
+    expect((w.inputs[1]?.["previous_attempt"] as Json)["issue"]).toBe("R1-1 is listed in none of applied, declined, asked and attached");
     expect(record(root).rounds[0]?.open).toEqual([expect.objectContaining({ id: "R1-1", left: "declined", reason: "its writer did not say whether it applied it" })]);
   });
 
@@ -152,7 +153,11 @@ describe("PRDR-284: what the writer leaves open (C-2¹⁴)", () => {
   it("asks for a cite of a default the writer added, and says it is owed when the second attempt still omits it", async () => {
     const root = repo(RAW);
     const notes: string[] = [];
-    const w = writer(() => ({ edit: { [DECISION_LOG_PATH]: (t) => (t.includes("| X-5 |") ? t : t.replace(/(\| X-4 \|[^\n]*\n)/u, "$1| X-5 | A loan lasts a week. | The documents imply it. |\n")) } }));
+    /* PRDR-342: declared, as a default WRITE adds is (C-3⁶). */
+    const w = writer((_, inputs) => ({
+      edit: { [DECISION_LOG_PATH]: (t) => (t.includes("| X-5 |") ? t : t.replace(/(\| X-4 \|[^\n]*\n)/u, "$1| X-5 | A loan lasts a week. | The documents imply it. |\n")) },
+      artifact: declaring(inputs, "X-5"),
+    }));
     const r = lendingOnce();
     await initThroughValidate(root, { reviewers: r, writer: w, notes });
     expect(w.inputs[1]?.["next_default"], "the next free id, counted over the log as it was before the round").toBe("X-5");

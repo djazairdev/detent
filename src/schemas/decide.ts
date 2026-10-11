@@ -63,6 +63,12 @@ export const touchSchema = z.strictObject({
 });
 export type Touch = z.infer<typeof touchSchema>;
 
+/** C-3⁶ (PRDR-341, PRDR-342): a default a writer added to the log, declared by its id as DECIDE declares one. */
+export const declaredDefaultSchema = z.strictObject({ id: nonEmptyString, basis: nonEmptyString, touches: z.array(touchSchema).default([]) });
+
+/** C-3⁶: an option of a question a writer asks, which never carries a stack: only DECIDE asks the stack (D-10′). */
+export const askedOptionSchema = decideOptionSchema.omit({ stack: true });
+
 export const decideDefaultSchema = z.strictObject({
   /** The decision, stated as a rule the plan follows. */
   value: nonEmptyString,

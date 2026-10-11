@@ -4213,6 +4213,12 @@ the rules it amends describe, and each of those rules points here.
   - **An answer is re-validated where it lands.** The round after an answer reviews the places that
     cite its question and the documents that cite them, not every document that cites any decision,
     as a changed log scopes a round under C-2¹⁴.
+  *Built by PRDR-342: VALIDATE's writer asks a finding whose fix is the founder's and attaches one an
+  open question settles, and declares every default it adds; each reviewer reads the questions and
+  reports the `founder` category; a blocker after a blocker reaches the writer marked with its chain,
+  which its question lists; and what waits on a question counts for neither the stop rule nor the
+  ceiling's stop (`src/init/validate-asks.ts`). An answer applied inside a round, and re-validated
+  where it lands, is PRDR-343's.*
 
 The `init` pipeline (§4.1 of v2) is **inherited** in its phases and interrupts — since C-2‴/C-3′ (3.1.1), and since C-2⁶/D-10′ (3.1.1, PRDR-278), and since C-3⁶ (PRDR-340), which takes away the stop after DECIDE: `INIT_FS → DISCOVER → [AWAIT_DOCS] → AUDIT → DECIDE → WRITE → VALIDATE → [AWAIT_INFO] → DETERMINE_VERIFICATION → [AWAIT_BINDING_CHOICE | AWAIT_SETUP_CONSENT] → SLICE → PLAN → PREPARE_AGENTS → PRESENT → [AWAIT_INFO | AWAIT_APPROVAL] → READY`; the interrupt set is the same five (C-3⁗) — and re-surfaced as plugin commands and skills. C-1…C-8 hold as the dated entries above amend them (with "kernel" → "referee"). v3 restates only the surface and the loop ownership:
 

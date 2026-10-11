@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { SCHEMA_VERSION, nonEmptyString } from "./common.js";
 import { SEVERITIES } from "./pack.js";
+import { askedOptionSchema, declaredDefaultSchema } from "./decide.js";
+import { QUESTION_ID } from "./founder-questions.js";
 
 /**
  * C-2⁶, C-2¹⁴ (PRDR-284) — what VALIDATE's sessions write: a reviewer's
@@ -9,7 +11,7 @@ import { SEVERITIES } from "./pack.js";
 
 /**
  * What a finding says is wrong: the nine kinds of defect the ksarjs review
- * brief named, stated for any pack. A category is what the finding is about,
+ * brief named, stated for any pack, and since PRDR-342 a tenth, the founder's. A category is what the finding is about,
  * and the severity is what it costs; neither decides the other.
  */
 export const FINDING_CATEGORIES = [
@@ -22,6 +24,12 @@ export const FINDING_CATEGORIES = [
   "gap",
   "name-drift",
   "present-indicative",
+  /**
+   * C-2²⁹ (PRDR-342): the reviewer as the founder's second reader: a default
+   * the line makes the founder's, a fix that would take a founder's decision,
+   * or an option whose consequence is wrong (C-3⁶).
+   */
+  "founder",
 ] as const;
 
 /** A passage a finding stands on, quoted from the line it starts on. Code checks that it is there. */
@@ -69,5 +77,23 @@ export const fixArtifactSchema = z.strictObject({
   schema_version: z.literal(SCHEMA_VERSION),
   applied: z.array(nonEmptyString),
   declined: z.array(z.strictObject({ id: nonEmptyString, reason: nonEmptyString })),
+  /**
+   * C-2²⁹ (PRDR-342): the findings whose fix is the founder's, each group one
+   * question, the recommended option first; none of them is patched.
+   */
+  asked: z
+    .array(
+      z.strictObject({
+        findings: z.array(nonEmptyString).min(1, "asks for no finding"),
+        question: nonEmptyString,
+        why_asked: nonEmptyString,
+        options: z.array(askedOptionSchema).min(2, "offers fewer than two options"),
+      }),
+    )
+    .default([]),
+  /** C-2²⁹: the findings an open question's answer settles, each by that question's `Q-n`; none is patched. */
+  attached: z.array(z.strictObject({ id: nonEmptyString, question: z.string().regex(QUESTION_ID, "names no question (Q-n)") })).default([]),
+  /** C-3⁶ (PRDR-342): each default the writer added, declared. */
+  defaults: z.array(declaredDefaultSchema).default([]),
 });
 export type FixArtifact = z.infer<typeof fixArtifactSchema>;

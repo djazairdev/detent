@@ -106,18 +106,6 @@ export const countsOf = (findings: readonly { readonly severity: Severity }[]): 
   minor: findings.filter((f) => f.severity === "minor").length,
 });
 
-/** The writer's account against the findings it was given: each id once, in `applied` or `declined`. */
-export function fixIssues(artifact: FixArtifact, ids: readonly string[]): string[] {
-  const listed = [...artifact.applied, ...artifact.declined.map((d) => d.id)];
-  const issues: string[] = [];
-  for (const id of new Set(listed)) {
-    if (!ids.includes(id)) issues.push(`${id} is not one of the findings you were given`);
-    else if (listed.filter((l) => l === id).length > 1) issues.push(`${id} is listed twice`);
-  }
-  for (const id of ids) if (!listed.includes(id)) issues.push(`${id} is listed in neither applied nor declined`);
-  return issues;
-}
-
 export interface Outcome {
   readonly left: "applied" | "declined" | "undone";
   readonly reason: string;
