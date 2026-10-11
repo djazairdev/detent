@@ -168,6 +168,8 @@ export interface Fixed {
   readonly diff: string | null;
   /** Whether every batch's fixes stand: false when one left the checker red, and its fixes were undone. */
   readonly stood: boolean;
+  /** PRDR-343: the questions whose answers the batches applied, which the round after verifies. */
+  readonly answered: readonly string[];
 }
 
 /**
@@ -190,6 +192,7 @@ export async function fixFindings(deps: RoundDeps, label: string, batches: reado
   /** C-2²⁷ (PRDR-323): what the batches of minors alone cost, read from the ledger rows their sessions wrote. */
   let minorsSpent = 0;
   const outcome = new Map<string, Outcome>();
+  const answered: string[] = [];
   let stood = true;
   const step =
     source === "review"
@@ -209,6 +212,7 @@ export async function fixFindings(deps: RoundDeps, label: string, batches: reado
       const fixed = await fixBatch(deps, stage, batch, source);
       if (alone.has(i)) minorsSpent += readLedgerRows(deps.root).slice(rowsBefore).reduce((usd, row) => usd + row.cost_estimate_usd, 0);
       for (const [id, left] of fixed.outcome) outcome.set(id, left);
+      answered.push(...fixed.answered);
       stood &&= fixed.stood;
       if (fixed.stood) noteUnitComplete(deps.root);
       unit?.done();
@@ -222,7 +226,7 @@ export async function fixFindings(deps: RoundDeps, label: string, batches: reado
     deps.note?.(`VALIDATE's writer, ${label}: the ${alone.size === 1 ? "batch" : `${String(alone.size)} batches`} of minors alone cost $${minorsSpent.toFixed(2)}, by their ledger rows (C-2²⁷)`);
   }
   const changed = changedFiles(deps.root, before);
-  return { outcome, changed, diff: changed.length === 0 ? null : writeDiff(deps.root, label, before, changed), stood };
+  return { outcome, changed, diff: changed.length === 0 ? null : writeDiff(deps.root, label, before, changed), stood, answered };
 }
 
 /** Where the diff of the writer labelled `label` is kept, repo-relative: the next round's reviewers read it, and so does a round that carries on after a stop. */

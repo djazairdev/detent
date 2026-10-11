@@ -25,6 +25,8 @@ const PRICE: FounderQuestion = {
     { file: "docs/roadmap.md", line: 4 },
   ],
   decision: null,
+  applied: false,
+  put_back: null,
 };
 const HOST: FounderQuestion = {
   ...PRICE,

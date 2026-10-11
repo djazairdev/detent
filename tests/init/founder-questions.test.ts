@@ -59,6 +59,8 @@ describe("PRDR-340: off a terminal, DECIDE records each question open and comple
           { file: "docs/roadmap.md", line: 4 },
         ],
         decision: null,
+        applied: false,
+        put_back: null,
       },
     ]);
     expect(keysSettledBy(root, "Q-1"), "C1, the price").toHaveLength(1);

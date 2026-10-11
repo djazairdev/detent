@@ -38,6 +38,17 @@ export const founderQuestionSchema = z.strictObject({
   places: z.array(questionPlaceSchema).default([]),
   /** The `D-n` the answer became; null while the question is open. */
   decision: nonEmptyString.nullable().default(null),
+  /**
+   * PRDR-343: true once VALIDATE's writer has applied the answer where the
+   * pack cited the question, or the pack cited it nowhere when it was answered.
+   */
+  applied: z.boolean().default(false),
+  /**
+   * PRDR-343: an answer given to the question's earlier wording, which a
+   * review found wrong and the writer corrected: put back to the founder, and
+   * never applied. Null once the question as it reads now is answered.
+   */
+  put_back: nonEmptyString.nullable().default(null),
 });
 export type FounderQuestion = z.infer<typeof founderQuestionSchema>;
 

@@ -4189,6 +4189,13 @@ the rules it amends describe, and each of those rules points here.
   against the questions record. While the question that settles the stack is open, the checker
   does not call the stack missing, and DETERMINE_VERIFICATION, which binds it, says where to
   answer it (`src/init/write-asks.ts`, `src/init/pack-check.ts`).*
+  *Built by PRDR-343: answers flow into VALIDATE: code reads them before each round's writer and
+  writes each to the log before the first batch; the writer applies each where its `Q-n` is cited and
+  cites its `D-n`, and code refuses an account that leaves one cited; a log only answers moved does
+  not scope a round, at a phase boundary either, so the round after reviews where they landed; and a
+  question a reviewer found wrong is corrected and asked again, an answer given to its earlier
+  wording put back to the founder (`src/init/validate-answers.ts`). Planning around an open question
+  is PRDR-344's.*
 
 - **C-2²⁹ (PRDR-338, 2026-10-11).** VALIDATE asks what its rounds cannot settle. C-2¹⁴'s writer
   patched every finding, and the loop asked only at its ceiling (specification decision 13). On

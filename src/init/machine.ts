@@ -10,7 +10,7 @@ import { NON_TICKET_FILES } from "../kernel/tickets/readers.js";
 import { INIT_PHASES, INTERRUPT_PHASE, type InitPhase, type Interrupt } from "../schemas/init.js";
 import { approvalSchema } from "../schemas/records.js";
 import { parseArtifact } from "../schemas/common.js";
-import { applyAnswers } from "./founder-questions.js";
+import { answerIntoLog } from "./validate-answers.js";
 import { SliceInFlightError, awaitingReplan, inFlightTickets, replanRefusal, replansAt, wouldReplan, type Progress } from "./replan-guard.js";
 
 /**
@@ -535,8 +535,12 @@ export async function runInit(
     const handler = handlers.find((h) => h.phase === phase);
     if (handler === undefined) continue;
 
-    /* C-3⁶ (PRDR-340): each phase boundary writes the founder's answers to the decision log, before any digest reads it. */
-    for (const text of applyAnswers(root)) (opts.note ?? ((t: string) => messages.push(t)))(text);
+    /*
+     * C-3⁶ (PRDR-340): each phase boundary writes the founder's answers to the
+     * decision log, before any digest reads it; since PRDR-343 the record holds
+     * a log only answers moved, so the round after reviews where they land.
+     */
+    for (const text of answerIntoLog(root)) (opts.note ?? ((t: string) => messages.push(t)))(text);
     opts.progress?.(phase);
     const ctx: InitContext = { root, outputs, now };
     /* C-2¹¹: a standalone phase's key is its own digest, and the chain passes it by. */

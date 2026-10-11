@@ -19,6 +19,7 @@ import { countsOf, mergeFindings, type Finding, type Outcome } from "./validate-
 import { dropKeptReviews, reviewRound, type KeptRoundDeps } from "./validate-kept.js";
 import { diffPath, fixFindings, writerBatches, type Fixed } from "./validate-fix.js";
 import { chainsOf, counted, questionOf, type Link } from "./validate-asks.js";
+import { pendingAnswers, takeAnswers } from "./validate-answers.js";
 import type { ReviewTask, Shown } from "./validate-round.js";
 import { offeredNote, withRoundScratch } from "./validate-scratch.js";
 import { areaOf, areasOf, reviewable, scopeOf, type Area } from "./validate-scope.js";
@@ -98,12 +99,14 @@ const shownOf = (o: Open): Shown => ({ id: o.id, severity: o.severity, places: [
 function startOf(deps: ValidateStageDeps, record: ConformanceRecord): Start | "concluded" {
   const moved = movedSince(deps.root, record);
   const edited = [...moved.added, ...moved.modified];
+  /* C-3⁶ (PRDR-343): an answer its writer could not apply yet is reviewed where the pack cites its question, and given to the next writer. */
+  const pending = pendingAnswers(deps.root).flatMap((a) => a.places.map(fileOf));
   const last = record.rounds.at(-1);
   if (record.validated || last === undefined) {
-    const seeds = record.validated ? [...edited, ...(last?.open ?? []).map(fileOf)] : null;
+    const seeds = record.validated ? [...edited, ...(last?.open ?? []).map(fileOf), ...pending] : null;
     return { rounds: [], seeds, previous: null, diff: null };
   }
-  const anything = edited.length + moved.removed.length > 0;
+  const anything = edited.length + moved.removed.length + pending.length > 0;
   /* C-2²⁹ (PRDR-342): what waits on the founder's answer does not count for the stop rule. */
   const waiting = last.open.filter((o) => o.severity !== "minor" && questionOf(o.reason) !== null).length;
   const met = last.counts.blocker + last.counts.major - waiting === 0;
@@ -111,7 +114,7 @@ function startOf(deps: ValidateStageDeps, record: ConformanceRecord): Start | "c
   const kept = diffPath(`round ${String(last.round)}`);
   return {
     rounds: record.rounds,
-    seeds: [...edited, ...last.changed, ...last.open.map(fileOf)],
+    seeds: [...edited, ...last.changed, ...last.open.map(fileOf), ...pending],
     previous: last.open.map(shownOf),
     diff: existsSync(path.join(deps.root, ...kept.split("/"))) ? kept : null,
   };
@@ -178,7 +181,8 @@ export async function validateStage(deps: ValidateStageDeps): Promise<PhaseOutco
   const { root, greenfield } = deps;
   const status = classifyPack(root, { greenfield });
   const record = readConformanceRecord(root);
-  if (record === null || status.kind === "conforming") {
+  /* C-3⁶ (PRDR-343): a conforming pack whose questions have answers to apply is validated where they land. */
+  if (record === null || (status.kind === "conforming" && pendingAnswers(root).length === 0)) {
     deps.note?.(
       record === null
         ? "VALIDATE: the documents are no pack, since WRITE wrote none, so nothing is validated, and planning reads them as they are (C-2¹⁴)"
@@ -189,12 +193,25 @@ export async function validateStage(deps: ValidateStageDeps): Promise<PhaseOutco
   }
   const red = await checkerFirst(deps);
   if (red !== null) return red;
+  await answersFirst(deps);
   const start = startOf(deps, record);
   if (start === "concluded") {
     deps.note?.(`VALIDATE: nothing in the pack moved since round ${String(record.rounds.length)}, the last its record holds, so no round runs, and its rounds say how the validation ends (C-2¹⁴)`);
     return conclude(deps, record.rounds);
   }
   return await loop(deps, start);
+}
+
+/**
+ * C-3⁶ (PRDR-343): the answers given since the pack was validated, or since a
+ * stopped validation's last round, applied by a writer before any round, so
+ * the first round reviews them where they landed and what cites those places.
+ */
+async function answersFirst(deps: ValidateStageDeps): Promise<void> {
+  const answers = takeAnswers(deps.root, deps.note);
+  if (answers.length === 0) return;
+  deps.note?.(`VALIDATE: the founder answered ${answers.map((a) => a.id).join(", ")}, which the pack cites; its writer applies ${answers.length === 1 ? "the answer" : "the answers"} before any round (C-3⁶)`);
+  await fixFindings(deps, "the founder's answers", [[]], "review");
 }
 
 /** C-2⁶: a red checker is fixed before any round, or `init` stops here, since nothing plans from a red pack (C-2⁷). */
@@ -247,10 +264,19 @@ async function loop(deps: ValidateStageDeps, start: Start): Promise<PhaseOutcome
     const counts = countsOf(findings);
     const { chains, marked } = chainsOf(findings, lineage, new Map((previous ?? []).map((p) => [p.id, p.severity])));
     const toFix = findings.map(({ id, severity, category, places, why, fix }) => ({ id, severity, category, places, why, fix, ...(marked.has(id) ? { ask: true, chain: marked.get(id) } : {}) }));
+    /* C-3⁶ (PRDR-343): the answers given while the round's reviewers ran, written to the log before its writer's first batch, which applies them. */
+    const answers = takeAnswers(deps.root, deps.note);
+    const batches = findings.length > 0 ? writerBatches(toFix) : answers.length > 0 ? [[]] : [];
     const fixed: Fixed =
-      findings.length === 0 ? { outcome: new Map(), changed: [], diff: null, stood: true } : await fixFindings(deps, `round ${String(r)}`, writerBatches(toFix), "review");
-    /* C-2²⁹: the stop rule counts what Detent can fix; the ceiling still bounds the rest (specification decision 3). */
-    const ends = counted(findings, fixed.outcome).length === 0;
+      batches.length === 0 ? { outcome: new Map(), changed: [], diff: null, stood: true, answered: [] } : await fixFindings(deps, `round ${String(r)}`, batches, "review");
+    /*
+     * C-2²⁹: the stop rule counts what Detent can fix; an answer applied is
+     * verified by the round after, and one its writer could not apply is
+     * reviewed again where it is cited, its next writer given it; the ceiling
+     * still bounds the rest (specification decision 3).
+     */
+    const unapplied = pendingAnswers(deps.root).flatMap((a) => a.places.map(fileOf));
+    const ends = counted(findings, fixed.outcome).length === 0 && fixed.answered.length === 0 && unapplied.length === 0;
     lineage = chains;
     const open = openOf(findings, fixed.outcome, r >= deps.ceiling);
     rounds.push({ round: r, counts, open, changed: [...fixed.changed] });
@@ -258,14 +284,15 @@ async function loop(deps: ValidateStageDeps, start: Start): Promise<PhaseOutcome
     dropKeptReviews(deps.root);
     noteUnitComplete(deps.root);
     const left = (kind: Outcome["left"]) => [...fixed.outcome.values()].filter((o) => o.left === kind).length;
+    const applied = fixed.answered.length === 0 ? "" : `; the founder's answers to ${fixed.answered.join(", ")} applied, which the round after verifies (C-3⁶)`;
     deps.note?.(
       `VALIDATE round ${String(r)}: ${plural(findings.length, "finding")} (${String(counts.blocker)} blocker, ${String(counts.major)} major, ` +
         `${String(counts.minor)} minor); ${String(left("applied"))} fixed, ${String(left("declined"))} declined, ${String(left("undone"))} undone, ` +
-        `${String([...fixed.outcome.values()].filter((o) => questionOf(o.reason) !== null).length)} waiting on the founder (C-2¹⁴, C-2²⁹)`,
+        `${String([...fixed.outcome.values()].filter((o) => questionOf(o.reason) !== null).length)} waiting on the founder (C-2¹⁴, C-2²⁹)${applied}`,
     );
     if (ends) return finished(deps, rounds, { ran: true });
     if (r >= deps.ceiling) return conclude(deps, rounds);
-    seeds = [...fixed.changed, ...findings.flatMap((f) => f.places.map(fileOf))];
+    seeds = [...fixed.changed, ...findings.flatMap((f) => f.places.map(fileOf)), ...unapplied];
     previous = findings.map((f) => ({ id: f.id, severity: f.severity, places: f.places, why: f.why, fix: f.fix, ...(fixed.outcome.get(f.id) ?? { left: "declined", reason: "" }) }));
     diff = fixed.diff;
   }

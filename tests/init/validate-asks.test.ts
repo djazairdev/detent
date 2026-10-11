@@ -58,7 +58,7 @@ describe("PRDR-342: the writer asks or attaches (C-2²⁹)", () => {
     expect(result.reachedPhase).toBe("READY");
     const why_asked = `${LOAN.why_asked} R1-1: ${String(finding()["why"])}`;
     expect(readQuestions(root).questions, "the reviewer's why follows the writer's").toEqual([
-      { id: "Q-1", phase: "VALIDATE", ...LOAN, why_asked, own_allowed: true, items: [], places: [{ file: LENDING_PRD, line: 6 }], decision: null },
+      { id: "Q-1", phase: "VALIDATE", ...LOAN, why_asked, own_allowed: true, items: [], places: [{ file: LENDING_PRD, line: 6 }], decision: null, applied: false, put_back: null },
     ]);
     expect(read(root, ".detent/questions.md")).toContain("## Q-1 — open (asked at VALIDATE)");
     expect(notes.join("\n")).toContain(`round 1: asks the founder 1 question, recorded in .detent/questions.md, and patches none of the findings asked (C-2²⁹):\n  Q-1 (asked at VALIDATE): ${LOAN.question}`);

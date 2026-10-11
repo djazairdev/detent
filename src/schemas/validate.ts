@@ -95,5 +95,20 @@ export const fixArtifactSchema = z.strictObject({
   attached: z.array(z.strictObject({ id: nonEmptyString, question: z.string().regex(QUESTION_ID, "names no question (Q-n)") })).default([]),
   /** C-3⁶ (PRDR-342): each default the writer added, declared. */
   defaults: z.array(declaredDefaultSchema).default([]),
+  /**
+   * C-3⁶ (PRDR-343): each question a reviewer found wrong, as it should read,
+   * with the findings its correction settles; code asks it again.
+   */
+  corrected: z
+    .array(
+      z.strictObject({
+        id: z.string().regex(QUESTION_ID, "names no question (Q-n)"),
+        findings: z.array(nonEmptyString).min(1, "settles no finding"),
+        question: nonEmptyString,
+        why_asked: nonEmptyString,
+        options: z.array(askedOptionSchema).min(2, "offers fewer than two options"),
+      }),
+    )
+    .default([]),
 });
 export type FixArtifact = z.infer<typeof fixArtifactSchema>;

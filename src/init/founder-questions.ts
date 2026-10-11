@@ -23,6 +23,8 @@ import { questionsFile, readAnswer, renderQuestions, unreadLine, writtenAnswers 
 const RECORD = "state/questions.json";
 
 const squash = (text: string): string => text.replace(/\s+/gu, " ").trim();
+/** An answer as the log reads, without the bold the log writes it in. */
+const plain = (text: string): string => squash(text.replace(/\*\*/gu, ""));
 
 export function readQuestions(root: string): QuestionsRecord {
   const empty: QuestionsRecord = { schema_version: SCHEMA_VERSION, questions: [] };
@@ -50,7 +52,7 @@ const writtenNow = (root: string): Map<string, string> =>
   existsSync(questionsFile(root)) ? writtenAnswers(readFileSync(questionsFile(root), "utf8")) : new Map<string, string>();
 
 /** A question to record: its id where the session that asked it cited one already (PRDR-341), else the next free one. */
-export type NewQuestion = Omit<FounderQuestion, "id" | "decision"> & { readonly id?: string };
+export type NewQuestion = Omit<FounderQuestion, "id" | "decision" | "applied" | "put_back"> & { readonly id?: string };
 
 /** Record `asked` open, each under its own id or numbered after every question the record holds, and render the file. */
 export function askQuestions(root: string, asked: readonly NewQuestion[]): FounderQuestion[] {
@@ -62,7 +64,7 @@ export function askQuestions(root: string, asked: readonly NewQuestion[]): Found
     const id = q.id ?? `Q-${String((top += 1))}`;
     if (used.has(id)) throw new Error(`${id} is asked already: a question's id is never reused (C-3⁶)`);
     used.add(id);
-    return { ...q, id, decision: null };
+    return { ...q, id, decision: null, applied: false, put_back: null };
   });
   const next: QuestionsRecord = { ...record, questions: [...record.questions, ...added] };
   writeArtifact(root, RECORD, next);
@@ -79,6 +81,24 @@ export function placeQuestions(root: string, places: ReadonlyMap<string, readonl
   writeArtifact(root, RECORD, next);
   render(root, next, writtenNow(root), new Map());
 }
+
+/**
+ * PRDR-343: the record with each question through `change`, and the file
+ * rendered, keeping what the founder wrote except where `unwritten` names a
+ * question, whose answer is taken out of the file.
+ */
+export function updateQuestions(root: string, change: (q: FounderQuestion) => FounderQuestion, unwritten: readonly string[] = []): QuestionsRecord {
+  const record = readQuestions(root);
+  const next: QuestionsRecord = { ...record, questions: record.questions.map(change) };
+  const written = writtenNow(root);
+  for (const id of unwritten) written.delete(id);
+  if (JSON.stringify(next) !== JSON.stringify(record)) writeArtifact(root, RECORD, next);
+  render(root, next, written, new Map());
+  return next;
+}
+
+/** What the founder wrote after a question's `Answer:` and code has not read yet. */
+export const unreadAnswer = (root: string, id: string): string => writtenNow(root).get(id) ?? "";
 
 /** The questions still open. */
 export const openQuestions = (record: QuestionsRecord): FounderQuestion[] => record.questions.filter((q) => q.decision === null);
@@ -119,7 +139,9 @@ export function applyAnswers(root: string): string[] {
     }
     const option = answer.kind === "option" ? q.options[answer.index] : undefined;
     const value = option?.answer ?? (answer.kind === "own" ? answer.text : "");
-    const logged = log.decisions.find((d) => squash(d.question) === squash(q.question));
+    /* PRDR-343: the same answer to the same question, so one a corrected question's earlier wording got is never taken for its new one. */
+    const reason = option?.consequence ?? "The founder's own answer, given in .detent/questions.md.";
+    const logged = log.decisions.find((d) => squash(d.question) === squash(q.question) && plain(d.answer) === plain(value) && squash(d.reason) === squash(reason));
     const id = logged?.id ?? nextD(decisions.length);
     answered.set(q.id, id);
     notes.push(`${q.id} is answered, and ${id} records it in ${DECISION_LOG_PATH}: ${squash(q.question)} → ${squash(value)} (C-3⁶)`);
@@ -128,12 +150,16 @@ export function applyAnswers(root: string): string[] {
       id,
       question: q.question,
       answer: value,
-      reason: option?.consequence ?? "The founder's own answer, given in .detent/questions.md.",
+      reason,
     });
     if (option?.stack !== undefined) stack = { ...option.stack, decision: id };
   }
   appendToDecisionLog(root, log, { decisions, defaults: [], stack }, ANSWERED_HEADINGS);
-  const next: QuestionsRecord = { ...record, questions: record.questions.map((q) => ({ ...q, decision: answered.get(q.id) ?? q.decision })) };
+  /* PRDR-343: an answer to the question as it reads now settles what was put back. */
+  const next: QuestionsRecord = {
+    ...record,
+    questions: record.questions.map((q) => (answered.has(q.id) ? { ...q, decision: answered.get(q.id) ?? null, put_back: null } : q)),
+  };
   if (answered.size > 0) writeArtifact(root, RECORD, next);
   render(root, next, written, unread);
   return notes;

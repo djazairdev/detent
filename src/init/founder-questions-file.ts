@@ -84,8 +84,12 @@ export function questionNote(q: FounderQuestion): string {
 
 export const unreadLine = (q: FounderQuestion, why: string): string => `> Detent could not read the answer below: ${why}. ${q.id} stays open.`;
 
+/** PRDR-343: what the file says of an answer given to a question's earlier wording. */
+export const putBackLine = (q: FounderQuestion): string =>
+  `> A review corrected this question after an answer was given to its earlier wording: ${squash(q.put_back ?? "")}. Detent did not apply it; answer the question as it reads now.`;
+
 function block(q: FounderQuestion, written: string, unread: string | undefined): string[] {
-  const status = q.decision === null ? "open" : `answered as ${q.decision}`;
+  const status = q.decision === null ? "open" : `answered as ${q.decision}${q.applied ? ", applied to the pack" : ""}`;
   const how =
     q.decision !== null
       ? `Recorded as ${q.decision} in ${DECISION_LOG_PATH}. To change it, edit that row, and re-run \`detent init\`.`
@@ -104,6 +108,7 @@ function block(q: FounderQuestion, written: string, unread: string | undefined):
     ...(q.places.length === 0 ? [] : ["", `Depends on it: ${q.places.map((p) => `${p.file}:${String(p.line)}`).join(", ")}`]),
     "",
     how,
+    ...(q.put_back === null ? [] : ["", putBackLine(q)]),
     ...(unread === undefined ? [] : ["", unreadLine(q, unread)]),
     "",
     `Answer: ${written}`.trimEnd(),
@@ -120,8 +125,9 @@ export function renderQuestions(record: QuestionsRecord, written: ReadonlyMap<st
     "everything that does not depend on an answer.",
     "",
     "Answer after a question's `Answer:`, with an option's number or, where the question takes them, your own words.",
-    `\`detent init\` reads this file at each phase boundary and writes each answer to ${DECISION_LOG_PATH} as a`,
-    "decision. It renders the file again each time, keeping what you wrote after each `Answer:` and nothing else.",
+    `\`detent init\` reads this file at each phase boundary, and before each writer of VALIDATE's rounds, and writes each`,
+    `answer to ${DECISION_LOG_PATH} as a decision, which VALIDATE then applies where the pack cites the question.`,
+    "It renders the file again each time, keeping what you wrote after each `Answer:` and nothing else.",
     "",
     `${String(open)} open, ${String(record.questions.length - open)} answered.`,
     ...record.questions.flatMap((q) => block(q, written.get(q.id) ?? "", unread.get(q.id))),

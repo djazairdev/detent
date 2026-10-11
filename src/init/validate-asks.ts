@@ -67,13 +67,15 @@ export function chainsOf(
  */
 export function accountIssues(artifact: FixArtifact, ids: readonly string[], marked: ReadonlySet<string>, record: QuestionsRecord): string[] {
   const asked = artifact.asked.flatMap((g) => g.findings);
-  const listed = [...artifact.applied, ...artifact.declined.map((d) => d.id), ...asked, ...artifact.attached.map((a) => a.id)];
+  /* PRDR-343: a finding the writer settled by correcting a question is accounted for there. */
+  const corrected = artifact.corrected.flatMap((c) => c.findings);
+  const listed = [...artifact.applied, ...artifact.declined.map((d) => d.id), ...asked, ...artifact.attached.map((a) => a.id), ...corrected];
   const issues: string[] = [];
   for (const id of new Set(listed)) {
     if (!ids.includes(id)) issues.push(`${id} is not one of the findings you were given`);
     else if (listed.filter((l) => l === id).length > 1) issues.push(`${id} is listed twice`);
   }
-  for (const id of ids) if (!listed.includes(id)) issues.push(`${id} is listed in none of applied, declined, asked and attached`);
+  for (const id of ids) if (!listed.includes(id)) issues.push(`${id} is listed in none of applied, declined, asked, attached and corrected`);
   const open = new Set(openQuestions(record).map((q) => q.id));
   for (const a of artifact.attached) if (!open.has(a.question)) issues.push(`${a.id} is attached to ${a.question}, which is no question still open`);
   for (const id of marked) {

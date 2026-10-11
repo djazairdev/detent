@@ -116,6 +116,7 @@ describe("PRDR-284: the writer accounts for every finding it was given", () => {
     declined,
     asked: [],
     attached: [],
+    corrected: [],
     defaults: [],
   });
   /* PRDR-342: the account is `accountIssues`', which takes asked and attached findings as well (C-2²⁹). */
@@ -129,7 +130,7 @@ describe("PRDR-284: the writer accounts for every finding it was given", () => {
     expect(fixIssues(account(["R1-1", "R1-1", "R9-9"]), ["R1-1", "R1-2"])).toEqual([
       "R1-1 is listed twice",
       "R9-9 is not one of the findings you were given",
-      "R1-2 is listed in none of applied, declined, asked and attached",
+      "R1-2 is listed in none of applied, declined, asked, attached and corrected",
     ]);
     expect(fixIssues(account(["R1-1"], [{ id: "R1-1", reason: "r" }]), ["R1-1"])).toEqual(["R1-1 is listed twice"]);
   });

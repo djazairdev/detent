@@ -132,7 +132,7 @@ describe("PRDR-284: what the writer leaves open (C-2¹⁴)", () => {
     const w = writer(() => ({ edit: { [LENDING_PRD]: (t) => `${t}\n` }, artifact: account([]) }));
     await initThroughValidate(root, { reviewers: lendingOnce(), writer: w });
     /* PRDR-342: an asked or attached finding is accounted for too (C-2²⁹). */
-    expect((w.inputs[1]?.["previous_attempt"] as Json)["issue"]).toBe("R1-1 is listed in none of applied, declined, asked and attached");
+    expect((w.inputs[1]?.["previous_attempt"] as Json)["issue"]).toBe("R1-1 is listed in none of applied, declined, asked, attached and corrected");
     expect(record(root).rounds[0]?.open).toEqual([expect.objectContaining({ id: "R1-1", left: "declined", reason: "its writer did not say whether it applied it" })]);
   });
 

@@ -129,7 +129,7 @@ describe("PRDR-341: WRITE asks what it finds open that is the founder's, and goe
     expect(result.interrupt).toBeUndefined();
     expect(stub.inputs, "the checker resolves the question the attempt cites before code records it").toHaveLength(1);
     const loan = readQuestions(root).questions.find((q) => q.id === "Q-2");
-    expect(loan).toEqual({ ...LOAN, phase: "WRITE", own_allowed: true, items: [], places: [{ file: "docs/prd/01-lending.md", line: 14 }], decision: null });
+    expect(loan).toEqual({ ...LOAN, phase: "WRITE", own_allowed: true, items: [], places: [{ file: "docs/prd/01-lending.md", line: 14 }], decision: null, applied: false, put_back: null });
     expect(notes.join("\n")).toContain("WRITE asks the founder 1 question it found open, recorded in .detent/questions.md");
     expect(notes.join("\n")).toContain("Q-2 (asked at WRITE): How long does a loan last?");
     expect(readDecisionLog(root).defaults.map((d) => d.value), "never settled as a default").not.toContain("Seven days");
