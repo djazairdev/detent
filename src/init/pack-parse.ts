@@ -133,15 +133,12 @@ function requireDocuments(pack: Pack, problems: Problems): void {
  * `test` where the language has none (D-10″): the binder asks, so the checker
  * does not.
  */
+export const MISSING_STACK =
+  "a greenfield pack records its stack entry under ## Stack (D-10′): the decision that settled it, the language, the toolchain and the scaffold files";
+
 function requireStack(pack: Pack, problems: Problems): void {
   if (pack.stack !== null) return;
-  problems.push({
-    rule: "stack",
-    file: DECISION_LOG_PATH,
-    line: 0,
-    text: "",
-    message: "a greenfield pack records its stack entry under ## Stack (D-10′): the decision that settled it, the language, the toolchain and the scaffold files",
-  });
+  problems.push({ rule: "stack", file: DECISION_LOG_PATH, line: 0, text: "", message: MISSING_STACK });
 }
 
 /* ---------------------------------------------------------------------------

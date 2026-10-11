@@ -263,8 +263,6 @@ describe("PRDR-340: on a pack WRITE has written, an answer starts neither a DECI
     await initThroughWrite(root, writer, { decideStub: sorted });
     expect(sorted.inputs).toHaveLength(1);
     expect(writer.inputs).toHaveLength(1);
-    const late = (writer.inputs[0]?.["findings"] as Json[]).find((f) => f["id"] === "G1");
-    expect(late?.["settled_by"], "an open question is no entry the pack can cite yet").toBeNull();
 
     answer(root, "Q-1", "1");
     const again = await initThroughWrite(root, writer, { decideStub: sorted });

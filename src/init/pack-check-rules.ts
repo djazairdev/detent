@@ -24,6 +24,8 @@ export interface CheckContext {
   readonly typed: ReadonlySet<string>;
   /** Whether a repo-relative path exists: the links rule's one look outside the pack. */
   readonly exists: (rel: string) => boolean;
+  /** C-3⁶ (PRDR-341): every question the questions record holds, open or answered, by its `Q-n`. */
+  readonly questions: ReadonlySet<string>;
 }
 
 interface Place {

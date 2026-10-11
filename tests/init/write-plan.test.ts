@@ -120,7 +120,8 @@ describe("PRDR-283: the phases after WRITE plan from the pack (C-2⁶)", () => {
       const log = read(r, DECISION_LOG_PATH).replace(/(\| X-3 \|[^\n]*\n)/u, "$1| X-4 | A loan lasts seven days. | The documents imply a week. |\n");
       return {
         files: { ...files, [DECISION_LOG_PATH]: log, "docs/prd/01-lending.md": `${files["docs/prd/01-lending.md"] ?? ""}- **LND-F-004** [M1] A loan MUST last seven days (X-4).\n- **LND-AC-04** [M1] Given a loan started on day 0, when day 7 ends, then it is due (LND-F-004).\n` },
-        artifact: WROTE(),
+        /* PRDR-341: declared, as DECIDE declares a default (C-3⁶). */
+        artifact: WROTE({ defaults: [{ id: "X-4", basis: "the documents imply a week", touches: [] }] }),
       };
     });
     const first = await init(root, adds);

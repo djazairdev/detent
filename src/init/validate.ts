@@ -21,7 +21,7 @@ import { diffPath, fixFindings, writerBatches, type Fixed } from "./validate-fix
 import type { ReviewTask, Shown } from "./validate-round.js";
 import { offeredNote, withRoundScratch } from "./validate-scratch.js";
 import { areaOf, areasOf, reviewable, scopeOf, type Area } from "./validate-scope.js";
-import { handoff, packDigest } from "./write.js";
+import { handoff, packDigest } from "./write-handoff.js";
 import { estimator } from "./progress.js";
 
 /**

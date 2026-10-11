@@ -49,18 +49,35 @@ function render(root: string, record: QuestionsRecord, written: ReadonlyMap<stri
 const writtenNow = (root: string): Map<string, string> =>
   existsSync(questionsFile(root)) ? writtenAnswers(readFileSync(questionsFile(root), "utf8")) : new Map<string, string>();
 
-export type NewQuestion = Omit<FounderQuestion, "id" | "decision">;
+/** A question to record: its id where the session that asked it cited one already (PRDR-341), else the next free one. */
+export type NewQuestion = Omit<FounderQuestion, "id" | "decision"> & { readonly id?: string };
 
-/** Record `asked` open, numbered after every question the record holds, and render the file. */
+/** Record `asked` open, each under its own id or numbered after every question the record holds, and render the file. */
 export function askQuestions(root: string, asked: readonly NewQuestion[]): FounderQuestion[] {
   if (asked.length === 0) return [];
   const record = readQuestions(root);
-  const top = Math.max(0, ...record.questions.map((q) => Number(q.id.slice(2))));
-  const added: FounderQuestion[] = asked.map((q, n) => ({ ...q, id: `Q-${String(top + 1 + n)}`, decision: null }));
+  const used = new Set(record.questions.map((q) => q.id));
+  let top = Math.max(0, ...[...used, ...asked.flatMap((q) => (q.id === undefined ? [] : [q.id]))].map((id) => Number(id.slice(2))));
+  const added: FounderQuestion[] = asked.map((q) => {
+    const id = q.id ?? `Q-${String((top += 1))}`;
+    if (used.has(id)) throw new Error(`${id} is asked already: a question's id is never reused (C-3⁶)`);
+    used.add(id);
+    return { ...q, id, decision: null };
+  });
   const next: QuestionsRecord = { ...record, questions: [...record.questions, ...added] };
   writeArtifact(root, RECORD, next);
   render(root, next, writtenNow(root), new Map());
   return added;
+}
+
+/** Point each open question at the places that now depend on it, where any do, and render the file (PRDR-341). */
+export function placeQuestions(root: string, places: ReadonlyMap<string, readonly { file: string; line: number }[]>): void {
+  const record = readQuestions(root);
+  const moved = record.questions.map((q) => (q.decision === null && places.has(q.id) ? { ...q, places: [...(places.get(q.id) ?? [])] } : q));
+  if (JSON.stringify(moved) === JSON.stringify(record.questions)) return;
+  const next: QuestionsRecord = { ...record, questions: moved };
+  writeArtifact(root, RECORD, next);
+  render(root, next, writtenNow(root), new Map());
 }
 
 /** The questions still open. */

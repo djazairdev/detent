@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { SCHEMA_VERSION, nonEmptyString } from "./common.js";
+import { decideOptionSchema, touchSchema } from "./decide.js";
+import { QUESTION_ID } from "./founder-questions.js";
 
 /**
  * C-2⁶, C-2¹³ (PRDR-283) — what WRITE's session writes beside the pack.
@@ -18,5 +20,22 @@ export const writeArtifactSchema = z.strictObject({
   archive: z.array(nonEmptyString),
   /** The originals kept as context documents, where they are. */
   context: z.array(nonEmptyString),
+  /**
+   * C-3⁶ (PRDR-341): each item WRITE found open that is the founder's, asked
+   * rather than settled, numbered from `next_question` and cited where the
+   * pack depends on it, the recommended option first.
+   */
+  questions: z
+    .array(
+      z.strictObject({
+        id: z.string().regex(QUESTION_ID, "a question's id is Q-n"),
+        question: nonEmptyString,
+        why_asked: nonEmptyString,
+        options: z.array(decideOptionSchema.omit({ stack: true })).min(2, "offers fewer than two options"),
+      }),
+    )
+    .default([]),
+  /** C-3⁶ (PRDR-341): each default WRITE added to the log, declared as DECIDE declares one: what settles it, and the founder decisions it touches. */
+  defaults: z.array(z.strictObject({ id: nonEmptyString, basis: nonEmptyString, touches: z.array(touchSchema).default([]) })).default([]),
 });
 export type WriteArtifact = z.infer<typeof writeArtifactSchema>;

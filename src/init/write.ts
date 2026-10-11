@@ -1,19 +1,19 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
-import { discover as discoverStack } from "../adapter/discover/index.js";
 import { stateDir } from "../fs/layout.js";
 import { noteUnitComplete } from "../kernel/ledger.js";
 import { SCHEMA_VERSION, parseArtifact } from "../schemas/common.js";
-import { CONFORMANCE_RECORD_PATH, DECISION_LOG_PATH, PACK_PATHS } from "../schemas/pack.js";
+import { DECISION_LOG_PATH, PACK_PATHS } from "../schemas/pack.js";
 import { writeArtifactSchema, type WriteArtifact } from "../schemas/write.js";
 import { isGreenfield } from "./greenfield.js";
 import { readDecideRecord } from "./decide-record.js";
 import { openItems } from "./decide-items.js";
 import { decisionLogFile, nextId, readDecisionLog, type LogView } from "./decide-log.js";
 import { readQuestions, standingEntry } from "./founder-questions.js";
+import { askedNote, openForWrite, questionIssues, recordAsked, refusedDefaults, removeRows } from "./write-asks.js";
 import { QUESTION_ID } from "../schemas/founder-questions.js";
-import { discoverDocs, docPatternsFor } from "./discover-docs.js";
-import { contentsDigest, listingDigest, valueDigest, type PhaseHandler, type PhaseOutcome } from "./machine.js";
+import { docPatternsFor } from "./discover-docs.js";
+import type { PhaseHandler, PhaseOutcome } from "./machine.js";
 import { checkPack } from "./pack-check.js";
 import { conformanceRecord, packDocuments, writeConformanceRecord } from "./pack.js";
 import type { PipelineDeps } from "./pipeline.js";
@@ -21,6 +21,7 @@ import { refusedAttemptInput, withOneRelaunch } from "./retry.js";
 import { sessionDeps } from "./session-deps.js";
 import { launchInitSession, withInitJournal } from "./session.js";
 import { checkerIssues, citeIssues, holdsRequirement, logIssues, resolveLists, type Cited, type ListPlan } from "./write-checks.js";
+import { handoff, packDigest } from "./write-handoff.js";
 import { repointLinks, type Repointed } from "./write-links.js";
 import { archiveOriginal, changedSince, restoreFile, rollback, snapshot, type Snapshot } from "./write-tree.js";
 
@@ -52,11 +53,30 @@ export function writeArtifactPath(root: string): string {
 }
 
 /** The `expected_output` skeleton; a test parses it through `writeArtifactSchema`, so the two cannot drift. */
-export function writeSkeleton(): Json {
+export function writeSkeleton(nextQuestion = "Q-1"): Json {
   return {
     schema_version: SCHEMA_VERSION,
     archive: ["<each document you were given whose content you rewrote into the pack>"],
     context: ["<each document you were given that stays as it is, where it is: a README, a runbook>"],
+    questions: [
+      {
+        id: nextQuestion,
+        question: "<a decision you found open that is the founder's by what it affects>",
+        why_asked: "<why it is the founder's>",
+        options: ["the option you recommend", "another option"].map((which) => ({
+          answer: `<${which}>`,
+          consequence: "<what choosing it means: what the product then does, protects, promises or costs>",
+          basis: "<what that consequence rests on: a primary source, the passages, or your reasoning from them>",
+        })),
+      },
+    ],
+    defaults: [
+      {
+        id: "<the X-n of a default you added to the log>",
+        basis: "<what settles it, in one line: a primary source, the passages, or the reasoning from them>",
+        touches: [{ decision: "<a founder decision it touches, as the documents or the log name it>", effect: "applies" }],
+      },
+    ],
   };
 }
 
@@ -90,9 +110,8 @@ const list = (value: unknown): Json[] => (Array.isArray(value) ? value.filter((v
 /**
  * Every finding AUDIT left open, with the entry that settled it, and the cites
  * that makes the pack owe. DECIDE ran in this `init` and re-settled any item
- * whose entry the log no longer held, so every entry here is in the log; an
- * item it left unsorted has none, and so has one a question still open
- * settles (C-3⁶).
+ * whose entry the log no longer held, so every entry here is in the log, or
+ * is a question still open (C-3⁶); an item it left unsorted has none.
  */
 function findings(deps: WriteStageDeps): { readonly shown: Json[]; readonly owed: Cited[] } {
   const settled = readDecideRecord(deps.root).settled;
@@ -100,16 +119,19 @@ function findings(deps: WriteStageDeps): { readonly shown: Json[]; readonly owed
   const shown: Json[] = [];
   const by = new Map<string, string[]>();
   for (const item of openItems(deps.audit, { stackOpen: false })) {
-    /* C-3⁶ (PRDR-340): an answered question stands for its D-n; one still open is no entry the pack can cite yet. */
+    /* C-3⁶ (PRDR-340, PRDR-341): an answered question stands for its D-n; one still open is cited where the pack writes its recommended option. */
     const standing = standingEntry(asked, settled[item.key] ?? "");
-    const entry = standing === "" || QUESTION_ID.test(standing) ? null : standing;
+    const entry = standing === "" ? null : standing;
     shown.push({ ...item.shown, settled_by: entry });
     if (entry !== null) by.set(entry, [...(by.get(entry) ?? []), item.id]);
   }
-  return { shown, owed: [...by].map(([id, items]) => ({ id, why: `which settles ${items.join(", ")}` })) };
+  const why = (id: string, items: readonly string[]): string =>
+    QUESTION_ID.test(id) ? `a question still open, which settles ${items.join(", ")}: write its recommended option there, and cite it` : `which settles ${items.join(", ")}`;
+  return { shown, owed: [...by].map(([id, items]) => ({ id, why: why(id, items) })) };
 }
 
 function sessionInputs(deps: WriteStageDeps, log: LogView, shown: readonly Json[], greenfield: boolean): Json {
+  const nextQuestion = `Q-${String(Math.max(0, ...readQuestions(deps.root).questions.map((q) => Number(q.id.slice(2)))) + 1)}`;
   return {
     task: "write",
     greenfield,
@@ -123,8 +145,10 @@ function sessionInputs(deps: WriteStageDeps, log: LogView, shown: readonly Json[
       ...log.defaults.map((d) => ({ id: d.id, value: d.value })),
     ],
     next_default: nextId(log.ids, "X")(0),
+    open_questions: openForWrite(readQuestions(deps.root)),
+    next_question: nextQuestion,
     pack_paths: [...PACK_PATHS],
-    expected_output: writeSkeleton(),
+    expected_output: writeSkeleton(nextQuestion),
   };
 }
 
@@ -143,8 +167,10 @@ function readWritten(file: string): { readonly artifact: WriteArtifact | null; r
 
 interface Written {
   readonly plan: ListPlan;
-  /** Defaults the session added to the log. */
+  /** Defaults the session added to the log, less the ones code refused (C-3⁶). */
   readonly added: readonly string[];
+  /** The questions it asked that code records (C-3⁶). */
+  readonly asked: WriteArtifact;
   /** Cites the pack still owes after the second attempt. */
   readonly owing: readonly string[];
 }
@@ -168,22 +194,37 @@ function evaluate(a: Attempt): { value: Written | null; issue: string | null } {
     restoreFile(deps.root, before, DECISION_LOG_PATH);
     deps.note?.(`WRITE: the decision log is restored as DECIDE left it, since the rewrite changed what it held: ${damaged.join("; ")}`);
   }
-  const added = damaged.length > 0 ? [] : readDecisionLog(deps.root).defaults.filter((d) => !a.logBefore.view.ids.has(d.id)).map((d) => d.id);
+  const gained = damaged.length > 0 ? [] : readDecisionLog(deps.root).defaults.filter((d) => !a.logBefore.view.ids.has(d.id)).map((d) => d.id);
+  /* C-3⁶ (PRDR-341): a default it did not declare, or one that changes a founder decision, is refused; a question keeps an id of its own. */
+  const refused = refusedDefaults(read.artifact, gained);
+  const reused = questionIssues(read.artifact, readQuestions(deps.root));
+  const added = gained.filter((id) => !refused.ids.includes(id));
   const { issues: listed, plan } = resolveLists(read.artifact, deps.documents, (rel) => changedSince(deps.root, before, rel));
   /* The pack as it will stand once the originals are archived. */
   const docs = packDocuments(deps.root).filter((rel) => !plan.archive.includes(rel));
-  const owing = citeIssues(deps.root, docs, [...a.owed, ...added.map((id) => ({ id, why: "a default you added to the log" }))]);
+  const owing = citeIssues(deps.root, docs, [
+    ...a.owed,
+    ...added.map((id) => ({ id, why: "a default you added to the log" })),
+    ...read.artifact.questions.map((q) => ({ id: q.id, why: "a question you asked, where the pack depends on its answer" })),
+  ]);
   const holds = holdsRequirement(deps.root, docs, a.greenfield);
+  const asking = read.artifact.questions.map((q) => q.id);
   const issues = [
     ...damaged,
+    ...refused.issues,
+    ...reused,
     ...listed,
     ...(holds ? [] : ["the pack holds no requirement: write the module PRDs under docs/prd/"]),
     ...owing,
-    ...checkerIssues(checkPack(deps.root, docs, { greenfield: a.greenfield })),
+    ...checkerIssues(checkPack(deps.root, docs, { greenfield: a.greenfield, asking })),
   ];
   if (a.strict && issues.length > 0) return { value: null, issue: issues.join("; ") };
   if (!holds) throw new Error("WRITE wrote no requirement in either attempt, so there is no pack to plan from (C-2¹³)");
-  return { value: { plan, added, owing }, issue: null };
+  removeRows(deps.root, refused.ids);
+  if (refused.ids.length > 0) deps.note?.(`WRITE: the log loses ${refused.ids.join(", ")}, which code refused: ${refused.issues.join("; ")}`);
+  const taken = new Set(readQuestions(deps.root).questions.map((q) => q.id));
+  const asked = { ...read.artifact, questions: read.artifact.questions.filter((q, n, all) => !taken.has(q.id) && all.findIndex((o) => o.id === q.id) === n) };
+  return { value: { plan, added, asked, owing }, issue: null };
 }
 
 const names = (rels: readonly string[]): string => (rels.length === 0 ? "none" : rels.join(", "));
@@ -204,6 +245,8 @@ function apply(deps: WriteStageDeps, before: Snapshot, written: Written, greenfi
   /* C-2²² (PRDR-312): the move broke every link to what it moved, so the links follow it before the checker reads them. */
   const documents = packDocuments(deps.root);
   const repointed = repointLinks(deps.root, documents, new Map(archived.map((m) => [m.from, m.to])));
+  /* C-3⁶ (PRDR-341): its questions are recorded open before the checker resolves their cites, and printed. */
+  const asked = recordAsked(deps.root, written.asked, documents);
   const checker = checkPack(deps.root, documents, { greenfield });
   writeConformanceRecord(deps.root, conformanceRecord(deps.root, { checker, rounds: [], date: deps.today, validated: false }));
   const blocking = checker.findings.filter((f) => f.blocks).length;
@@ -211,6 +254,7 @@ function apply(deps: WriteStageDeps, before: Snapshot, written: Written, greenfi
     `WRITE wrote the pack: it archived ${names(archived.map((m) => m.from))}, kept ${names(written.plan.context)} as context, and rewrote ` +
       `${names(rewritten.map((r) => r.path))} in place, keeping each original in archive/. The conformance record says the pack is not validated (C-2¹³)`,
     ...(repointed.length === 0 ? [] : [repointNote(repointed)]),
+    ...(asked.length === 0 ? [] : [askedNote(asked)]),
     ...written.plan.notes,
     ...written.owing.map((issue) => `WRITE: ${issue}; the pack goes to planning without it (C-2⁶)`),
     ...(checker.green ? [] : [`WRITE: the pack checker is red, with ${String(blocking)} blocking finding${blocking === 1 ? "" : "s"}; the pack goes to planning as it stands (C-2¹³)`]),
@@ -225,6 +269,7 @@ function apply(deps: WriteStageDeps, before: Snapshot, written: Written, greenfi
     repointed,
     context: [...written.plan.context],
     added_defaults: [...written.added],
+    asked: asked.map((q) => q.id),
     checker_green: checker.green,
   });
 }
@@ -252,46 +297,6 @@ export async function writeStage(deps: WriteStageDeps): Promise<PhaseOutcome> {
     throw err;
   }
   return apply(deps, before, written, greenfield);
-}
-
-/**
- * What the planning phases read, from the disk, whether the phase handing it
- * on wrote or not: the documents DISCOVER's patterns find now, the decision
- * log among them where it exists, the stack markers, and the log's entries.
- * VALIDATE hands it on, as the specification phase's last step (C-2¹⁴);
- * WRITE's is what planning reads where VALIDATE is not in the pipeline.
- */
-export function handoff(root: string, patterns: readonly string[], run: Json): PhaseOutcome {
-  const log = readDecisionLog(root);
-  const found = discoverDocs(root, patterns).docs.filter((doc) => doc !== DECISION_LOG_PATH);
-  return {
-    kind: "complete",
-    outputs: {
-      docs: log.exists ? [...found, DECISION_LOG_PATH].sort() : found,
-      stack_markers: [...discoverStack(root).stack.markers],
-      decisions: log.decisions,
-      defaults: log.defaults,
-      ...run,
-    },
-  };
-}
-
-/**
- * C-2¹³, C-2¹⁴: everything WRITE's and VALIDATE's outputs say, read from the
- * disk alone, as a phase that restarts the chain must: the documents and stack
- * markers DISCOVER's patterns find, the pack's contents and its record, whose
- * kind decides whether either writes, and `plan_docs`. Never a prompt: once
- * the pack is written or validated, a new prompt writes nothing, and a key
- * that named it would re-plan every pack on an upgrade. Never VALIDATE's
- * ceiling, which bounds a validation and never reopens a finished one.
- */
-export function packDigest(root: string, patterns: readonly string[], planDocs: readonly string[] | undefined): string {
-  const markers = discoverStack(root).stack.markers.map((m) => `marker:${m}`);
-  return [
-    listingDigest([...discoverDocs(root, patterns).docs, ...markers]),
-    contentsDigest(root, [...packDocuments(root), CONFORMANCE_RECORD_PATH]),
-    valueDigest(planDocs ?? []),
-  ].join("|");
 }
 
 /** What WRITE says when it writes nothing: a pack of each kind but raw, or a set `plan_docs` narrows. */
@@ -348,10 +353,4 @@ export function writePhase(deps: PipelineDeps): PhaseHandler {
       );
     },
   };
-}
-
-/** C-2¹³, C-2¹⁴: the stack markers the planning phases read: VALIDATE's, or WRITE's or DISCOVER's where it is not in the pipeline. */
-export function planningMarkers(outputs: Readonly<Record<string, Record<string, unknown>>>): string[] {
-  const markers = outputs["VALIDATE"]?.["stack_markers"] ?? outputs["WRITE"]?.["stack_markers"] ?? outputs["DISCOVER"]?.["stack_markers"];
-  return Array.isArray(markers) ? (markers as string[]) : [];
 }

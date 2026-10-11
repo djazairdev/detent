@@ -76,6 +76,8 @@ const quoted = (ids: readonly string[]) => ids.map((id) => `\`${id}\``).join(", 
  */
 
 export const DECISION_REF = /(?<![\w-])([DX])-(\d+)\b/u;
+/** C-3⁶ (PRDR-341): a question the founder was asked, cited where the pack depends on its answer. */
+export const QUESTION_REF = /(?<![\w-])Q-(\d+)\b/u;
 export const FACT_REF = /\b(?:verified-)?facts(?:\.md)?\s+§\s?(\d+(?:\.\d+)?)(?:\s*[–—-]\s*§?\s?(\d+(?:\.\d+)?))?/u;
 
 export function references(ctx: CheckContext): PackFinding[] {
@@ -96,6 +98,9 @@ export function references(ctx: CheckContext): PackFinding[] {
     if (context) continue;
     for (const { m, line } of scan(text, DECISION_REF)) {
       if (!decisions.has(m[0])) out.push(finding("reference", { file, line }, `\`${m[0]}\`: no such ${m[1] === "D" ? "decision" : "default"} in docs/founder-decisions.md`));
+    }
+    for (const { m, line } of scan(text, QUESTION_REF)) {
+      if (!ctx.questions.has(m[0])) out.push(finding("reference", { file, line }, `\`${m[0]}\`: no such question in .detent/questions.md`));
     }
     for (const { m, line } of scan(text, FACT_REF)) {
       const missing = [m[1], m[2]].filter((id): id is string => id !== undefined && !resolvesFact(id, facts, factSections));

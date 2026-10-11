@@ -4181,8 +4181,14 @@ the rules it amends describe, and each of those rules points here.
   *Built by PRDR-340: DECIDE records a question nobody answers on a TTY open as `Q-n`
   (`.detent/state/questions.json`, rendered to `.detent/questions.md`), prints it, and completes;
   an open question settles its items, and each phase boundary writes the answers given since to
-  the decision log (`src/init/questions.ts`). DECIDE raises no AWAIT_INFO. WRITE, VALIDATE and
-  planning do not yet read an open question: PRDR-341 to PRDR-344 build that.*
+  the decision log (`src/init/founder-questions.ts`). DECIDE raises no AWAIT_INFO. WRITE, VALIDATE
+  and planning do not yet read an open question: PRDR-341 to PRDR-344 build that.*
+  *Built by PRDR-341: WRITE is told the open questions and cites each where the pack depends on it,
+  asks what it finds open that is the founder's, and declares every default it adds; code refuses
+  an undeclared default and one that changes a founder decision, and the checker resolves `Q-n`
+  against the questions record. While the question that settles the stack is open, the checker
+  does not call the stack missing, and DETERMINE_VERIFICATION, which binds it, says where to
+  answer it (`src/init/write-asks.ts`, `src/init/pack-check.ts`).*
 
 - **C-2²⁹ (PRDR-338, 2026-10-11).** VALIDATE asks what its rounds cannot settle. C-2¹⁴'s writer
   patched every finding, and the loop asked only at its ceiling (specification decision 13). On

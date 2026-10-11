@@ -2,7 +2,8 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { packKindOf, type ConformanceRecord, type PackFinding } from "../schemas/pack.js";
 import { readLines, type Line } from "./pack-markdown.js";
-import { parsePack } from "./pack-parse.js";
+import { MISSING_STACK, parsePack } from "./pack-parse.js";
+import { openQuestions, readQuestions } from "./founder-questions.js";
 import { catalogueEntries, catalogueUses, links, references, sectionRefs } from "./pack-check-refs.js";
 import { HEURISTIC, at, byPlace, coverage, milestoneOrder, presentIndicative, registry, sequence, unique, type CheckContext } from "./pack-check-rules.js";
 
@@ -46,7 +47,7 @@ const RULES: readonly Rule[] = [unique, catalogueEntries, sequence, registry, re
  * Check `documents` (repo-relative, as discovery returns them). `greenfield`
  * is code's, from the stack markers (D-10′), as it is for the schema.
  */
-export function checkPack(root: string, documents: readonly string[], opts: { readonly greenfield: boolean }): PackCheck {
+export function checkPack(root: string, documents: readonly string[], opts: { readonly greenfield: boolean; readonly asking?: readonly string[] }): PackCheck {
   const { pack, problems, refused } = parsePack(root, documents, opts);
   const lines = new Map<string, readonly Line[]>();
   const typed = new Set<string>();
@@ -56,8 +57,18 @@ export function checkPack(root: string, documents: readonly string[], opts: { re
     lines.set(rel, readLines(root, rel));
     if (kind !== "context") typed.add(rel);
   }
-  const ctx: CheckContext = { pack, refused, lines, typed, exists: (rel) => existsSync(path.join(root, ...rel.split("/"))) };
-  const findings = settle([...problems, ...RULES.flatMap((rule) => rule(ctx))], lines);
+  /*
+   * C-3⁶ (PRDR-341): a `Q-n` resolves against the questions record, open or answered, as an `X-n` against the log.
+   * The record is local run state, so a pack that cites a question is checked where it was asked. While the question
+   * that settles the stack is open, the stack waits for its answer rather than being missing.
+   */
+  const asked = readQuestions(root);
+  /* `asking`: the questions a writer cites before code records them (PRDR-341). */
+  const questions = new Set([...asked.questions.map((q) => q.id), ...(opts.asking ?? [])]);
+  const stackWaits = openQuestions(asked).some((q) => q.options.some((o) => o.stack !== undefined));
+  const ctx: CheckContext = { pack, refused, lines, typed, exists: (rel) => existsSync(path.join(root, ...rel.split("/"))), questions };
+  const found = stackWaits ? problems.filter((p) => p.message !== MISSING_STACK) : problems;
+  const findings = settle([...found, ...RULES.flatMap((rule) => rule(ctx))], lines);
   return { green: findings.every((f) => !f.blocks), findings };
 }
 
