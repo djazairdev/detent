@@ -3,7 +3,7 @@ on:
   pull_request:
   push:
     branches: [main]
-  workflow_dispatch:   # release.yml starts it on the release pull request
+  workflow_dispatch:   # to run the checks by hand
 
 # The jobs only read the repository (CodeQL: actions/missing-workflow-permissions).
 permissions:
