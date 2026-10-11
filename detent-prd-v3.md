@@ -4160,8 +4160,9 @@ the rules it amends describe, and each of those rules points here.
     each phase boundary and before each VALIDATE round's writer, and writes each answer to the
     decision log as a `D-n` between writer batches, so no batch's restore or rollback of the log
     undoes it (C-2¹⁴). The next writer applies the answer where its `Q-n` is cited, and the round
-    after verifies it (C-2²⁹). An answer applied mid-run makes neither DECIDE's nor WRITE's
-    checkpoint stale.
+    after verifies it (C-2²⁹). An answer applied mid-run starts neither a DECIDE nor a WRITE
+    session on a pack WRITE has written: both re-run in code, since their keys name the log
+    (P9), and write nothing.
   - **Planning plans around open questions.** SLICE cuts the whole pack as written. PLAN drafts
     every slice that holds no requirement citing an open `Q-n`, and a slice that does waits for its
     answer. When every phase has done what it can, `init` raises AWAIT_INFO once, just before
@@ -4177,6 +4178,11 @@ the rules it amends describe, and each of those rules points here.
   *Built by PRDR-339: DECIDE draws the line, every default names its `basis` and the founder
   decisions it `touches`, every option names its `basis`, and a default that changes a founder
   decision is refused (`src/init/decide-items.ts`, `prompts/spec_write.md`).*
+  *Built by PRDR-340: DECIDE records a question nobody answers on a TTY open as `Q-n`
+  (`.detent/state/questions.json`, rendered to `.detent/questions.md`), prints it, and completes;
+  an open question settles its items, and each phase boundary writes the answers given since to
+  the decision log (`src/init/questions.ts`). DECIDE raises no AWAIT_INFO. WRITE, VALIDATE and
+  planning do not yet read an open question: PRDR-341 to PRDR-344 build that.*
 
 - **C-2²⁹ (PRDR-338, 2026-10-11).** VALIDATE asks what its rounds cannot settle. C-2¹⁴'s writer
   patched every finding, and the loop asked only at its ceiling (specification decision 13). On
@@ -4202,7 +4208,7 @@ the rules it amends describe, and each of those rules points here.
     cite its question and the documents that cite them, not every document that cites any decision,
     as a changed log scopes a round under C-2¹⁴.
 
-The `init` pipeline (§4.1 of v2) is **inherited** in its phases and interrupts — since C-2‴/C-3′ (3.1.1), and since C-2⁶/D-10′ (3.1.1, PRDR-278): `INIT_FS → DISCOVER → [AWAIT_DOCS] → AUDIT → DECIDE → [AWAIT_INFO] → WRITE → VALIDATE → [AWAIT_INFO] → DETERMINE_VERIFICATION → [AWAIT_BINDING_CHOICE | AWAIT_SETUP_CONSENT] → SLICE → PLAN → PREPARE_AGENTS → PRESENT → [AWAIT_INFO | AWAIT_APPROVAL] → READY`; the interrupt set is the same five (C-3⁗) — and re-surfaced as plugin commands and skills. C-1…C-8 hold as the dated entries above amend them (with "kernel" → "referee"). v3 restates only the surface and the loop ownership:
+The `init` pipeline (§4.1 of v2) is **inherited** in its phases and interrupts — since C-2‴/C-3′ (3.1.1), and since C-2⁶/D-10′ (3.1.1, PRDR-278), and since C-3⁶ (PRDR-340), which takes away the stop after DECIDE: `INIT_FS → DISCOVER → [AWAIT_DOCS] → AUDIT → DECIDE → WRITE → VALIDATE → [AWAIT_INFO] → DETERMINE_VERIFICATION → [AWAIT_BINDING_CHOICE | AWAIT_SETUP_CONSENT] → SLICE → PLAN → PREPARE_AGENTS → PRESENT → [AWAIT_INFO | AWAIT_APPROVAL] → READY`; the interrupt set is the same five (C-3⁗) — and re-surfaced as plugin commands and skills. C-1…C-8 hold as the dated entries above amend them (with "kernel" → "referee"). v3 restates only the surface and the loop ownership:
 
 - **C-1′** `init` and `run` are the plugin's two commands (`/detent:init`, `/detent:run`), and Detent registers skills so the model invokes the right phase from natural intent ("plan this repo", "keep going"). The headless driver exposes the same two as the retained CLI verbs. C-1's git-root rule and the five C-5 interrupts are unchanged; interrupts are surfaced as the plugin's **presented decisions**, still a closed set of five.
   *AC:* the plugin manifest registers exactly two commands; a docs test asserts the five-decision closed set; subdirectory invocation still exits/《presents》 the root hint with no `.detent/` created.

@@ -91,7 +91,8 @@ describe("PRDR-338 the PRD records the founder's line and questions that do not 
     const answers = clause("C-3⁶", "Answers flow in.");
     expect(answers).toMatch(/before each VALIDATE round's writer/u);
     expect(answers).toMatch(/as a `D-n` between writer batches/u);
-    expect(answers).toMatch(/makes neither DECIDE's nor WRITE's checkpoint stale/u);
+    /* PRDR-340: WRITE's key names the log (P9), so an answer re-runs it, in code: what holds is that no session starts. */
+    expect(answers).toMatch(/starts neither a DECIDE nor a WRITE session on a pack WRITE has written/u);
   });
 
   it("planning waits only for the slices that cite an open question, and PRESENT needs every answer", () => {

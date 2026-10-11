@@ -8,12 +8,12 @@ import type { SessionSpec } from "../../src/sessions/backend.js";
 import { MockBackend, okResult, type StageFn } from "../../src/sessions/mock.js";
 import { BUDGETS, PROMPTS } from "./plan-fixture.js";
 import { inputsOf } from "./slicing-fixture.js";
-import { DOCS, SORTED, SURVEY, auditFinds, decide, type Decide, type Json } from "./decide-fixture.js";
+import { DOCS, SETTLED, SURVEY, auditFinds, decide, type Decide, type Json } from "./decide-fixture.js";
 
 /**
  * PRDR-283 — WRITE's fixture: the DECIDE fixture's two documents and a README,
- * an AUDIT that finds their three items, a DECIDE that settles them off a
- * terminal (X-1 late returns, X-2 the refund fee, X-3 the stack, X-4 the price),
+ * an AUDIT that finds their three items, a DECIDE that settles them by
+ * defaults (X-1 late returns, X-2 the refund fee, X-3 the stack, X-4 the price),
  * and a WRITE session scripted per test. Greenfield, as the DECIDE fixture is.
  */
 
@@ -155,7 +155,7 @@ export interface Run {
 
 /** The real pipeline, stopped after WRITE unless `all` or `through` says otherwise. */
 export async function initThroughWrite(root: string, stub: Write, opts: Run = {}) {
-  const script = { audit: auditReads, spec_write: specWrite(opts.decideStub ?? decide((_, i) => SORTED(i)), stub, opts.fixStub), ...opts.script };
+  const script = { audit: auditReads, spec_write: specWrite(opts.decideStub ?? decide((_, i) => SETTLED(i)), stub, opts.fixStub), ...opts.script };
   const handlers = buildPipeline({
     root,
     backend: opts.backend?.(script) ?? new MockBackend(script),

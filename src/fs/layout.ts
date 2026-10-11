@@ -73,6 +73,12 @@ export const LAYOUT: readonly LayoutEntry[] = [
   { rel: "transitions.jsonl", kind: "file", tracking: "local", ownership: "run-level", stamped: false },
   { rel: HOOK_SURFACE_FILE, kind: "file", tracking: "local", ownership: "run-level", stamped: true },
   { rel: HOOK_STAGE_FILE, kind: "file", tracking: "local", ownership: "run-level", stamped: true },
+  /**
+   * C-3⁶ (PRDR-340): the founder's questions, rendered from
+   * `state/questions.json` and answered in place. Run state, as the record
+   * is: an answer travels as the decision it becomes in the decision log.
+   */
+  { rel: "questions.md", kind: "file", tracking: "local", ownership: "run-level", stamped: false },
 ];
 
 export const COMMITTED = LAYOUT.filter((e) => e.tracking === "committed");

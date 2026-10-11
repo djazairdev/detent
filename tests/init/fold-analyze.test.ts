@@ -345,7 +345,7 @@ describe("PRDR-290: a state an older build left holds ANALYZE's checkpoint (F-3)
     expect(again.reused).toEqual(expect.arrayContaining(["DETERMINE_VERIFICATION", "SLICE", "PLAN", "PREPARE_AGENTS"]));
     expect(log, "no planning session").toEqual([]);
     expect(stub.inputs, "no second session: every item is settled").toHaveLength(1);
-    expect(notes).toContain("DECIDE: every item AUDIT left open is settled by an entry the decision log still holds, so no session ran (C-2¹²)");
+    expect(notes).toContain("DECIDE: every item AUDIT left open is settled by an entry the decision log still holds, or by a question still open, so no session ran (C-2¹², C-3⁶)");
     expect(analysisLeft(root)).toBe(false);
   });
 
@@ -353,11 +353,11 @@ describe("PRDR-290: a state an older build left holds ANALYZE's checkpoint (F-3)
     const root = repo(DOCS);
     leaveAnalysis(root);
     const stub = decide((_, inputs) => SORTED(inputs));
-    const later: DecideAsk = async () => "later";
-    const deferred = await initThrough(root, stub, { ask: later });
-    expect(deferred.reachedPhase).toBe("DECIDE");
-    expect(deferred.interrupt?.interrupt).toBe("AWAIT_INFO");
-    expect(why(deferred.messages)).toBeDefined();
+    /* PRDR-340: answering later completes DECIDE now (C-3⁶), so a terminal that fails mid-screen is what leaves it incomplete. */
+    const closed: DecideAsk = async () => {
+      throw new Error("the terminal closed");
+    };
+    await expect(initThrough(root, stub, { ask: closed })).rejects.toThrow("the terminal closed");
     expect(analysisLeft(root), "DECIDE did not complete").toBe(true);
     const answered = await initThrough(root, stub, { ask: async (screen) => screen.map(() => ({ option: 0 })) });
     expect(answered.reachedPhase).toBe("READY");

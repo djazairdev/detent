@@ -49,15 +49,15 @@ describe("T-023 F-1 split", () => {
       /* PRDR-281: AUDIT's claim briefs, committed as planning briefs are (C-2¹¹). PRDR-286: the amendments filed against the pack (X-4⁸). */
       [".gitignore", "agents", "amendments", "bindings.json", "config.json", "plan", "research/audit", "research/failures"],
     );
-    /** T-120/T-121 added the two D-21 hook-policy files to the local set. */
+    /** T-120/T-121 added the two D-21 hook-policy files to the local set; PRDR-340, the founder's questions (C-3⁶). */
     expect(LOCAL.map((e) => e.rel).sort()).toEqual(
-      ["active_surface.json", "claims", "ledger.jsonl", "logs", "runs", "stage.json", "state", "transitions.jsonl", "worktrees"],
+      ["active_surface.json", "claims", "ledger.jsonl", "logs", "questions.md", "runs", "stage.json", "state", "transitions.jsonl", "worktrees"],
     );
   });
 
   it("encodes draft.5's ownership split — journals and hook policy are run-level, single-writer", () => {
     expect(RUN_LEVEL.map((e) => e.rel).sort()).toEqual(
-      ["active_surface.json", "ledger.jsonl", "logs", "stage.json", "transitions.jsonl"],
+      ["active_surface.json", "ledger.jsonl", "logs", "questions.md", "stage.json", "transitions.jsonl"],
     );
     expect(LOCAL.filter((e) => e.ownership === "per-ticket").map((e) => e.rel).sort()).toEqual(
       ["claims", "runs", "state", "worktrees"],

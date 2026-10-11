@@ -10,6 +10,8 @@ import { isGreenfield } from "./greenfield.js";
 import { readDecideRecord } from "./decide-record.js";
 import { openItems } from "./decide-items.js";
 import { decisionLogFile, nextId, readDecisionLog, type LogView } from "./decide-log.js";
+import { readQuestions, standingEntry } from "./founder-questions.js";
+import { QUESTION_ID } from "../schemas/founder-questions.js";
 import { discoverDocs, docPatternsFor } from "./discover-docs.js";
 import { contentsDigest, listingDigest, valueDigest, type PhaseHandler, type PhaseOutcome } from "./machine.js";
 import { checkPack } from "./pack-check.js";
@@ -89,14 +91,18 @@ const list = (value: unknown): Json[] => (Array.isArray(value) ? value.filter((v
  * Every finding AUDIT left open, with the entry that settled it, and the cites
  * that makes the pack owe. DECIDE ran in this `init` and re-settled any item
  * whose entry the log no longer held, so every entry here is in the log; an
- * item it left unsorted has none.
+ * item it left unsorted has none, and so has one a question still open
+ * settles (C-3⁶).
  */
 function findings(deps: WriteStageDeps): { readonly shown: Json[]; readonly owed: Cited[] } {
   const settled = readDecideRecord(deps.root).settled;
+  const asked = readQuestions(deps.root);
   const shown: Json[] = [];
   const by = new Map<string, string[]>();
   for (const item of openItems(deps.audit, { stackOpen: false })) {
-    const entry = settled[item.key] ?? null;
+    /* C-3⁶ (PRDR-340): an answered question stands for its D-n; one still open is no entry the pack can cite yet. */
+    const standing = standingEntry(asked, settled[item.key] ?? "");
+    const entry = standing === "" || QUESTION_ID.test(standing) ? null : standing;
     shown.push({ ...item.shown, settled_by: entry });
     if (entry !== null) by.set(entry, [...(by.get(entry) ?? []), item.id]);
   }

@@ -152,26 +152,34 @@ export interface LogAdditions {
   readonly stack: DecidedStack | null;
 }
 
-/** Append what DECIDE settled; nothing already in the log is changed or moved. */
-export function appendToDecisionLog(root: string, log: LogView, add: LogAdditions): void {
+/** The `###` headings a writer files its rows under: DECIDE's, or an answer's from the questions file (C-3⁶, PRDR-340). */
+export interface LogHeadings {
+  readonly asked: string;
+  readonly settled: string;
+}
+
+export const AT_DECIDE: LogHeadings = { asked: "Asked at DECIDE", settled: "Settled at DECIDE" };
+
+/** Append what DECIDE settled, or what the founder answered; nothing already in the log is changed or moved. */
+export function appendToDecisionLog(root: string, log: LogView, add: LogAdditions, at: LogHeadings = AT_DECIDE): void {
   if (add.decisions.length === 0 && add.defaults.length === 0 && add.stack === null) return;
   const file = decisionLogFile(root);
   const text = log.exists ? readFileSync(file, "utf8") : `${NEW_LOG.join("\n")}\n`;
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
   const lines = text.split(/\r?\n/u);
-  insertRows(lines, "Decisions", "Asked at DECIDE", ["Id", "Question", "Answer", "Reason"], add.decisions.map((d) => [d.id, d.question, `**${d.answer}**`, d.reason]));
-  insertRows(lines, "Defaults", "Settled at DECIDE", ["Id", "Default", "Reason"], add.defaults.map((d) => [d.id, d.value, d.reason]));
+  insertRows(lines, "Decisions", at.asked, ["Id", "Question", "Answer", "Reason"], add.decisions.map((d) => [d.id, d.question, `**${d.answer}**`, d.reason]));
+  insertRows(lines, "Defaults", at.settled, ["Id", "Default", "Reason"], add.defaults.map((d) => [d.id, d.value, d.reason]));
   if (add.stack !== null && !log.hasStack) {
     const s = add.stack;
     const scaffold = s.scaffold_files.map((f) => `\`${f}\``).join(", ");
-    insertRows(lines, "Stack", "Settled at DECIDE", ["Field", "Value"], [
+    insertRows(lines, "Stack", at.settled, ["Field", "Value"], [
       ["decision", s.decision],
       ["language", s.language],
       ["toolchain", s.toolchain],
       ...(scaffold === "" ? [] : [["scaffold", scaffold]]),
     ]);
     const slots = Object.entries(s.gates).filter(([slot]) => !log.rootSlots.has(slot));
-    insertRows(lines, "Packages", "Settled at DECIDE", ["Package", "Slot", "Command"], slots.map(([slot, command]) => [".", slot, `\`${command}\``]));
+    insertRows(lines, "Packages", at.settled, ["Package", "Slot", "Command"], slots.map(([slot, command]) => [".", slot, `\`${command}\``]));
   }
   if (lines.at(-1) !== "") lines.push("");
   mkdirSync(path.dirname(file), { recursive: true });

@@ -113,6 +113,19 @@ export function openItems(audit: Json | undefined, opts: { readonly stackOpen: b
   return items;
 }
 
+/** C-3⁶ (PRDR-340): the places the items quote, each `file:line` once, in the order they come: what depends on a question's answer. */
+export function placesOf(items: readonly Item[]): { file: string; line: number }[] {
+  const places = new Map<string, { file: string; line: number }>();
+  for (const item of items) {
+    for (const p of [...list(item.shown["passages"]), ...list(item.shown["places"]), ...list([item.shown["passage"]])]) {
+      const file = text(p["file"]);
+      const line = p["line"];
+      if (file !== "" && typeof line === "number" && Number.isInteger(line) && line > 0) places.set(`${file}:${String(line)}`, { file, line });
+    }
+  }
+  return [...places.values()];
+}
+
 export interface DecideCheck {
   /** Empty when the artifact sorts every item once and cites only what exists. */
   readonly issues: readonly string[];
@@ -171,7 +184,8 @@ export function checkDecide(artifact: DecideArtifact, items: readonly Item[], lo
     const answered = answeredBy(q.question);
     if (answered !== undefined) {
       /* Kept as what it is: its items are the log's to settle, since the log answers it. */
-      issues.push(`${who} ("${q.question}") is one the decision log already answers, as ${answered.id}; cite it in settled instead (C-3‴)`);
+      const already = answered.id.startsWith("Q-") ? `is already asked and open, as ${answered.id}` : `is one the decision log already answers, as ${answered.id}`;
+      issues.push(`${who} ("${q.question}") ${already}; cite it in settled instead (C-3‴)`);
       for (const item of claim(q.settles.filter((id) => id !== "stack"), `the log's ${answered.id}`)) settled.push({ item, entry: answered.id });
       return;
     }

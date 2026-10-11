@@ -67,13 +67,15 @@ export type Interrupt = (typeof INTERRUPTS)[number];
 export const INTERRUPT_PHASE = {
   AWAIT_DOCS: ["DISCOVER"],
   /**
-   * C-3⁗ (PRDR-282): at DECIDE, on a terminal, for the questions a founder
-   * defers; at VALIDATE, for a blocker left at its ceiling or a pack checker
-   * its writer could not make green (C-2¹⁴, PRDR-284); and at PRESENT, for a
-   * spec defect planning found or a check that still fails (C-4⁵, A-1⁷). No
-   * question is asked there since C-7‴ (PRDR-296).
+   * At VALIDATE, for a blocker left at its ceiling or a pack checker its
+   * writer could not make green (C-2¹⁴, PRDR-284); and at PRESENT, for a spec
+   * defect planning found or a check that still fails (C-4⁵, A-1⁷). No
+   * question is asked there since C-7‴ (PRDR-296). C-3⁶ (PRDR-340): DECIDE
+   * raises it no longer, since a question it leaves unanswered is recorded
+   * open and waited on by nothing; C-3⁗ (PRDR-282) raised it there for the
+   * questions a founder on a terminal deferred.
    */
-  AWAIT_INFO: ["DECIDE", "VALIDATE", "PRESENT"],
+  AWAIT_INFO: ["VALIDATE", "PRESENT"],
   AWAIT_BINDING_CHOICE: ["DETERMINE_VERIFICATION"],
   AWAIT_SETUP_CONSENT: ["DETERMINE_VERIFICATION"],
   AWAIT_APPROVAL: ["PRESENT"],

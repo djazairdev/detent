@@ -75,9 +75,15 @@ describe("PRDR-282: the terminal asker", () => {
     expect(t.closed()).toBe(1);
   });
 
-  it("defers every question on `l`, and still closes the terminal", async () => {
+  it("PRDR-340: keeps the answers given before `l`, leaves the rest for later, and still closes the terminal (C-3⁶)", async () => {
     const t = scripted(["1", "l"]);
-    expect(await makeTtyDecisions(t.io)([PRICE, HOST])).toBe("later");
+    expect(await makeTtyDecisions(t.io)([PRICE, HOST])).toEqual([{ option: 0 }]);
     expect(t.closed()).toBe(1);
+    const first = scripted(["l"]);
+    expect(await makeTtyDecisions(first.io)([PRICE, HOST])).toEqual([]);
+  });
+
+  it("PRDR-340: says on the screen where a question answered later goes (C-3⁶)", () => {
+    expect(renderScreen([PRICE, HOST])).toContain("`l` leaves a question and every one after it open in .detent/questions.md");
   });
 });

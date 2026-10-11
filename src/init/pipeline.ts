@@ -88,7 +88,7 @@ export interface PipelineDeps {
    * without an asker of its own.
    */
   readonly askApproval?: (presentation: string) => Promise<ApprovalDecision>;
-  /** C-3⁗ (PRDR-282): DECIDE's questions, asked on a terminal; absent, each recommended answer is taken (specification decision 9). */
+  /** C-3⁗ (PRDR-282): DECIDE's questions, asked on a terminal; absent, each is recorded open for the founder (C-3⁶, PRDR-340). */
   readonly askDecisions?: DecideAsk;
   /** S-1⁗ (PRDR-285): the sandbox VALIDATE's reviewers simulate in, asked when a round first runs; absent, this machine is probed. */
   readonly sandbox?: () => Promise<Sandbox>;

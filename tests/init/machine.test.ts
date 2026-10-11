@@ -77,13 +77,14 @@ describe("T-060 C-5: the interrupt set is closed", () => {
       for (const phase of INTERRUPT_PHASE[interrupt]) expect(INIT_PHASES).toContain(phase);
     }
     /**
-     * PRDR-282: AWAIT_INFO is raised at DECIDE as well as at PRESENT (C-3⁗);
+     * PRDR-282: AWAIT_INFO was raised at DECIDE as well as at PRESENT (C-3⁗);
      * PRDR-284: and at VALIDATE, for a blocker left at its ceiling or a checker
-     * it cannot make green (C-2¹⁴). The set stays five (C-5).
+     * it cannot make green (C-2¹⁴); PRDR-340: DECIDE raises it no longer, and
+     * records a question open (C-3⁶). The set stays five (C-5).
      */
     expect(INTERRUPT_PHASE).toEqual({
       AWAIT_DOCS: ["DISCOVER"],
-      AWAIT_INFO: ["DECIDE", "VALIDATE", "PRESENT"],
+      AWAIT_INFO: ["VALIDATE", "PRESENT"],
       AWAIT_BINDING_CHOICE: ["DETERMINE_VERIFICATION"],
       AWAIT_SETUP_CONSENT: ["DETERMINE_VERIFICATION"],
       AWAIT_APPROVAL: ["PRESENT"],

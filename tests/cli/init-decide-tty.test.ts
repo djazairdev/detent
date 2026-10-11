@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readDecisionLog } from "../../src/init/decide-log.js";
 import { MockBackend } from "../../src/sessions/mock.js";
@@ -45,6 +47,9 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+/** What the last `init` printed. */
+let printed = "";
+
 async function init(onTerminal: boolean, answers: string[]): Promise<string> {
   const root = repo({ ...LONE_CANDIDATE, ...DOCS, "prd-billing.md": "# Billing\n" });
   setTty(onTerminal ? true : undefined);
@@ -59,6 +64,7 @@ async function init(onTerminal: boolean, answers: string[]): Promise<string> {
   try {
     await initMain([root], { buildBackend: () => backend });
   } finally {
+    printed = out.mock.calls.map((c) => String(c[0])).join("");
     out.mockRestore();
     err.mockRestore();
   }
@@ -73,11 +79,21 @@ describe("PRDR-282 a terminal is asked DECIDE's questions, by the asker that rea
     expect(readDecisionLog(root).decisions.map((d) => [d.id, d.answer])).toEqual([["D-1", "**Two dollars a day**"]]);
   }, 60_000);
 
-  it("asks nothing off a terminal, and takes the recommended answer as a default", async () => {
+  it("PRDR-340: asks nothing off a terminal, takes no answer for the founder, and prints the question it records open (C-3⁶)", async () => {
     const root = await init(false, []);
     expect(reader.asked).toEqual([]);
     const log = readDecisionLog(root);
     expect(log.decisions).toEqual([]);
-    expect(log.defaults.map((d) => d.value)).toContain("Free in the MVP");
+    expect(log.defaults.map((d) => d.value)).not.toContain("Free in the MVP");
+    expect(readFileSync(path.join(root, ".detent", "questions.md"), "utf8")).toContain("## Q-1 — open (asked at DECIDE)");
+    expect(printed).toContain("Q-1 (asked at DECIDE): Is borrowing free at launch, or two dollars a day?");
+    expect(printed).toContain("1) Free in the MVP (recommended) — No revenue until pricing lands.");
+  }, 60_000);
+
+  it("PRDR-340: on a terminal, `l` records the question open and init goes on (C-3⁶)", async () => {
+    const root = await init(true, ["l"]);
+    expect(readDecisionLog(root).decisions).toEqual([]);
+    expect(readFileSync(path.join(root, ".detent", "questions.md"), "utf8")).toContain("## Q-1 — open (asked at DECIDE)");
+    expect(printed).not.toContain("[AWAIT_INFO]");
   }, 60_000);
 });

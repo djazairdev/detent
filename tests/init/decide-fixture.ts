@@ -100,6 +100,20 @@ export const SORTED = (inputs: Json): Json => {
   return artifact({ questions: [PRICE], defaults: [LATE, REFUND, ...(ids.includes("stack") ? [STACK_DEFAULT] : [])] });
 };
 
+/**
+ * PRDR-340: the price as a default, numbered where the recommended answer was
+ * logged before C-3⁶, after the other defaults. Off a terminal a question is
+ * recorded open now, and is no entry a pack cites, so the tests of the phases
+ * after DECIDE settle every item by a default.
+ */
+export const PRICE_DEFAULT = { value: "Free in the MVP", reason: "The PRD is the later intent.", basis: "PRD.md:3, which makes borrowing free", settles: ["C1"] };
+
+/** Every item settled by a default, the price last, and the stack where it is open. */
+export const SETTLED = (inputs: Json): Json => {
+  const ids = (inputs["items"] as { id: string }[]).map((i) => i.id);
+  return artifact({ defaults: [LATE, REFUND, ...(ids.includes("stack") ? [STACK_DEFAULT] : []), PRICE_DEFAULT] });
+};
+
 const THROUGH_DECIDE = new Set(["INIT_FS", "DISCOVER", "AUDIT", "DECIDE"]);
 
 export interface Through {
