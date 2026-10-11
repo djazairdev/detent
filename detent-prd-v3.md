@@ -4182,7 +4182,7 @@ the rules it amends describe, and each of those rules points here.
   (`.detent/state/questions.json`, rendered to `.detent/questions.md`), prints it, and completes;
   an open question settles its items, and each phase boundary writes the answers given since to
   the decision log (`src/init/founder-questions.ts`). DECIDE raises no AWAIT_INFO. WRITE, VALIDATE
-  and planning do not yet read an open question: PRDR-341 to PRDR-344 build that.*
+  and planning did not yet read an open question then: PRDR-341 to PRDR-344 built that.*
   *Built by PRDR-341: WRITE is told the open questions and cites each where the pack depends on it,
   asks what it finds open that is the founder's, and declares every default it adds; code refuses
   an undeclared default and one that changes a founder decision, and the checker resolves `Q-n`
@@ -4196,6 +4196,11 @@ the rules it amends describe, and each of those rules points here.
   question a reviewer found wrong is corrected and asked again, an answer given to its earlier
   wording put back to the founder (`src/init/validate-answers.ts`). Planning around an open question
   is PRDR-344's.*
+  *Built by PRDR-344: PLAN drafts every slice that cites no question the pack does not yet hold the
+  answer to, and one that does waits, named with its questions; PRESENT holds approval with
+  AWAIT_INFO while a question is open or answered and not yet applied, listing each with its options
+  and the slices that wait, and `run`'s exit holds it too; the next `detent init` applies the answers
+  and plans the slices that waited (`src/init/plan-waits.ts`).*
 
 - **C-2²⁹ (PRDR-338, 2026-10-11).** VALIDATE asks what its rounds cannot settle. C-2¹⁴'s writer
   patched every finding, and the loop asked only at its ceiling (specification decision 13). On

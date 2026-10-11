@@ -1,4 +1,5 @@
 import { REVIEW_SEVERITIES, type PlanFinding, type PlanRisk } from "../schemas/init.js";
+import type { WaitingSlice } from "./plan-waits.js";
 import type { PresentInput } from "./present.js";
 import { isPresentedDefect } from "./present-spec.js";
 
@@ -19,7 +20,7 @@ export function presentInputsFromOutputs(
   outputs: Readonly<Record<string, Record<string, unknown>>>,
 ): Pick<
   PresentInput,
-  "slices" | "decisions" | "defaults" | "risks" | "specDefects" | "findings" | "reviewRisks" | "unreviewed" | "derivedEdges" | "gateNotices"
+  "slices" | "decisions" | "defaults" | "risks" | "specDefects" | "findings" | "reviewRisks" | "unreviewed" | "derivedEdges" | "gateNotices" | "waiting"
 > {
   /**
    * PRDR-157: `?? []` only covered null and undefined, so any OTHER wrong type
@@ -80,6 +81,11 @@ export function presentInputsFromOutputs(
       .filter(isRow("slice", "severity", "tag", "ticket", "finding", "fix"))
       .filter((r): r is PlanRisk => (REVIEW_SEVERITIES as readonly string[]).includes(r.severity) && r.severity !== "minor"),
     unreviewed: list<unknown>("PLAN", "unreviewed").filter(isRow("slice", "reason")),
+    /* C-3⁶ (PRDR-344): the slices that wait for the founder's answers. */
+    waiting: list<unknown>("PLAN", "waiting").filter((w): w is WaitingSlice => {
+      const questions = (w as { questions?: unknown } | null)?.questions;
+      return isRow("slice")(w) && Array.isArray(questions) && questions.every((q) => typeof q === "string");
+    }),
     derivedEdges: list<{ consumer: string; provider: string; contract: string }>("PLAN", "derived_edges").filter(isEdge),
     gateNotices: list<unknown>("DETERMINE_VERIFICATION", "gate_notices").filter((n): n is string => typeof n === "string"),
   };

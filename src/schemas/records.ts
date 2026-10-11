@@ -318,6 +318,12 @@ export const presentationSchema = z.strictObject({
    */
   check_failures: z.number().int().nonnegative(),
   /**
+   * C-3⁶ (PRDR-344): the questions PRESENT listed as not yet answered and
+   * applied; while any is, neither exit offers approval. A record written
+   * before it held none it could list.
+   */
+  open_questions: z.number().int().nonnegative().default(0),
+  /**
    * N-5″ (PRDR-297): the Detent builds that made the plan, as PRESENT named
    * them. More than one, or one unrecorded, and neither exit approves without
    * the operator accepting that (C-7″). Required, as the counts are: a record

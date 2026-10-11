@@ -5,6 +5,7 @@ import { stateDir } from "../fs/layout.js";
 import { parseArtifact } from "../schemas/common.js";
 import { planDraftSchema, type CheckFailure, type PlanDraftTicket, type ReviewFinding, type SliceSpec, type SpecDefect } from "../schemas/init.js";
 import { planSlices } from "./plan-slices.js";
+import { waitingSlices } from "./plan-waits.js";
 import { checkPlan, failureLine, type PlanContext } from "./plan-checks.js";
 import type { Gates } from "./plan-check-gates.js";
 import type { Binding } from "../schemas/records.js";
@@ -188,8 +189,16 @@ export async function draftPlan(deps: PlanDeps, scope: DraftScope = {}, previous
  * handed that code had proved it was told to treat as handled.
  */
 export async function planStage(deps: PlanDeps): Promise<PhaseOutcome> {
-  const slices: readonly SliceSpec[] = deps.slices !== undefined && deps.slices.length > 0 ? deps.slices : [wholeProduct(deps.docs)];
-  const context = planContext(deps);
+  const cut: readonly SliceSpec[] = deps.slices !== undefined && deps.slices.length > 0 ? deps.slices : [wholeProduct(deps.docs)];
+  /*
+   * C-3⁶ (PRDR-344): a slice whose records cite a question the pack does not
+   * yet hold the answer to waits, undrafted, and is out of the plan and of its
+   * checks until the `detent init` that finds the question settled.
+   */
+  const waiting = waitingSlices(deps.root, deps.pack ?? null, cut);
+  for (const w of waiting) deps.note?.(`${w.slice}: waits for the founder's answer to ${w.questions.join(", ")}, so it is not drafted (C-3⁶)`);
+  const slices = cut.filter((s) => !waiting.some((w) => w.slice === s.id));
+  const context = planContext({ ...deps, slices: [...slices] });
   const planned = await planSlices(deps, slices, context);
   /**
    * A-1‴ (PRDR-120): the declarations are checked by code, after every model
@@ -252,6 +261,8 @@ export async function planStage(deps: PlanDeps): Promise<PhaseOutcome> {
       derived_edges: final.derived as unknown as Record<string, unknown>[],
       /* C-8⁵ (PRDR-286): the slices this run planned again, which an applied amendment is marked with. */
       replanned: planned.replanned,
+      /* C-3⁶ (PRDR-344): the slices that wait for the founder's answers, which PRESENT names. */
+      waiting: waiting as unknown as Record<string, unknown>[],
     },
   };
 }

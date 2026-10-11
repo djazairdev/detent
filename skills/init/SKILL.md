@@ -134,7 +134,15 @@ decision yourself.
    after the question's `Answer:`, by an option's number or in their own
    words, and the next phase boundary writes the answer to
    `docs/founder-decisions.md` as a decision. Relay a question as printed and
-   never answer it yourself. At `VALIDATE` (C-2¹⁴), the
+   never answer it yourself. `VALIDATE` applies each answer where the pack
+   cites its question; `PLAN` drafts every slice that rests on no question
+   still open, and a slice that does waits. At `PRESENT` (C-3⁶), while a
+   question is open, or answered and not yet applied, `init` stops once, with
+   each question and its options and the slices that wait; approval is not
+   offered on either exit. Channel: the human answers in
+   `.detent/questions.md`; then re-invoke, and `init` applies the answers,
+   re-validates where they land and plans the slices that waited. At
+   `VALIDATE` (C-2¹⁴), the
    review rounds reached their ceiling with a blocker left open, or the pack
    checker stayed red: the message lists each one at its `file:line`. Channel:
    the human settles each in the pack, or, for a blocker, raises

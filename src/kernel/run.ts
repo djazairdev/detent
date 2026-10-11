@@ -13,7 +13,7 @@ import { gateLabel } from "../adapter/packages.js";
 import { acquireRunLock, lockPhaseSuffix, runLockRefusal } from "./run-lock.js";
 import { migrateState, migrationNote } from "./migrate.js";
 import { approvalState } from "../init/machine.js";
-import { MIXED_BUILDS_REFUSED, readPresentation, recordApproval, type ApprovalDecision } from "../init/present.js";
+import { MIXED_BUILDS_REFUSED, questionsRefusal, readPresentation, recordApproval, type ApprovalDecision } from "../init/present.js";
 import { isMixed } from "./build.js";
 import { recordPlanQuality } from "./plan-quality.js";
 import { NON_TICKET_FILES } from "./tickets/readers.js";
@@ -481,6 +481,9 @@ async function offerDeferredApproval(opts: RunOptions, refusal: string): Promise
         "amend the pack where each one quotes it and re-run `detent init` (C-4⁵).",
     );
   }
+  /* C-3⁶ (PRDR-344): and for a question the pack does not yet hold the answer to. */
+  const asked = questionsRefusal(opts.root, shown.open_questions);
+  if (asked !== null) return notReady(asked);
   /* A-1⁷ (PRDR-293): and for a check that still fails, a path no gate can fail among them (V-5′). */
   if (shown.check_failures > 0) {
     return notReady(

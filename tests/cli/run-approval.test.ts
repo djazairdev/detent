@@ -4,6 +4,7 @@ import path from "node:path";
 import { main as runMain } from "../../src/cli/run.js";
 import { stateDir } from "../../src/fs/layout.js";
 import { approvalPath, presentStage, type ApprovalDecision } from "../../src/init/present.js";
+import { askQuestions } from "../../src/init/founder-questions.js";
 import { readBindings } from "../../src/adapter/drift.js";
 import { allTickets } from "../../src/kernel/tickets/readers.js";
 import { removeTree } from "../helpers.js";
@@ -186,6 +187,43 @@ describe("C-7 `detent run` presents a plan that was never approved", () => {
     expect(asked, "`run` does not offer what `init` refused to offer").toBe(0);
     expect(said.code).toBe(2);
     expect(said.out, "and it says which gate stopped it").toContain("spec defect");
+    expect(existsSync(approvalPath(root))).toBe(false);
+  }, 60_000);
+
+  /**
+   * PRDR-344 (C-3⁶): a question for the founder holds approval until it is
+   * answered and applied, on this exit as on `init`'s, whether PRESENT listed
+   * it or it was asked since.
+   */
+  it("a plan with a question for the founder is presented but not approvable", async () => {
+    const { root } = await makeRunRepo();
+    roots.push(root);
+    addTicket(root, { id: "t-100" });
+    await deferred(root);
+    askQuestions(root, [
+      {
+        phase: "VALIDATE",
+        question: "What happens when a tool comes back late?",
+        why_asked: "It is a fee the members pay.",
+        options: [
+          { answer: "New loans wait", consequence: "No fee.", basis: "the PRD" },
+          { answer: "A day's fee", consequence: "Members pay.", basis: "the roadmap" },
+        ],
+        own_allowed: true,
+        items: [],
+        places: [],
+      },
+    ]);
+    let asked = 0;
+    const said = await runWith(root, {
+      approve: async () => {
+        asked += 1;
+        return { kind: "approved", by: "should-never-be-asked" };
+      },
+    });
+    expect(asked, "a question asked since PRESENT holds approval too").toBe(0);
+    expect(said.code).toBe(2);
+    expect(said.out).toContain("1 question(s) for the founder hold approval of this plan");
     expect(existsSync(approvalPath(root))).toBe(false);
   }, 60_000);
 

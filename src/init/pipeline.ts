@@ -1,4 +1,5 @@
 import { discover as discoverStack, gatherFacts } from "../adapter/discover/index.js";
+import { unsettled, unsettledQuestions } from "./plan-waits.js";
 import { ROOT_PACKAGE, findPackages, gateLabel, packageDir } from "../adapter/packages.js";
 import { initLayout, stateDir } from "../fs/layout.js";
 import type { Budgets } from "../schemas/budgets.js";
@@ -321,6 +322,8 @@ function planPhase(deps: PipelineDeps): PhaseHandler {
         ctx.outputs["DETERMINE_VERIFICATION"]?.["packages"] ?? null,
         ctx.outputs["SLICE"]?.["slices"] ?? null,
         planPrompts(deps),
+        /* C-3⁶ (PRDR-344): which slices wait turns on which questions the pack does not yet hold the answer to. */
+        unsettled(deps.root).map((q) => q.id),
       ])}`,
     /** C-8‴: the tickets and the plan artifact are PLAN's output; if they are gone, plan again. */
     outputIntact: () => planOutputIntact(deps.root),
@@ -403,6 +406,8 @@ function presentPhase(deps: PipelineDeps): PhaseHandler {
         ctx.outputs["PLAN"]?.["tickets"] ?? null,
         ctx.outputs["PREPARE_AGENTS"]?.["assignments"] ?? null,
         presentInputsFromOutputs(ctx.outputs),
+        /* C-3⁶ (PRDR-344): a question answered or asked moves what PRESENT holds approval for. */
+        unsettled(deps.root).map((q) => [q.id, q.decision, q.applied]),
       ]),
     run: async (ctx) => {
       const stored = readBindings(deps.root);
@@ -414,6 +419,8 @@ function presentPhase(deps: PipelineDeps): PhaseHandler {
         skips: stored.skips,
         packages: stored.packages,
         checks: presentChecks(deps.root, ctx.outputs),
+        /* C-3⁶ (PRDR-344): read when PRESENT runs, as the founder answers between runs. */
+        questions: unsettledQuestions(deps.root),
         bootstrap: (ctx.outputs["PLAN"]?.["bootstrap"] as string | null | undefined) ?? null,
         assignments: (ctx.outputs["PREPARE_AGENTS"]?.["assignments"] as Record<string, string> | undefined) ?? {},
         ...inputs,
