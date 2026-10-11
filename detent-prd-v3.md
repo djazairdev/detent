@@ -4174,6 +4174,9 @@ the rules it amends describe, and each of those rules points here.
     mid-run and cites no open place, but an unattended run idles until someone answers: on Hearth,
     8½ hours at DECIDE.
   The five interrupts stay five: the one stop raises AWAIT_INFO.
+  *Built by PRDR-339: DECIDE draws the line, every default names its `basis` and the founder
+  decisions it `touches`, every option names its `basis`, and a default that changes a founder
+  decision is refused (`src/init/decide-items.ts`, `prompts/spec_write.md`).*
 
 - **C-2²⁹ (PRDR-338, 2026-10-11).** VALIDATE asks what its rounds cannot settle. C-2¹⁴'s writer
   patched every finding, and the loop asked only at its ceiling (specification decision 13). On

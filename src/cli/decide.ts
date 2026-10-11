@@ -37,13 +37,13 @@ export function renderScreen(screen: readonly AskedQuestion[]): string {
   const last = screen.at(-1)?.number ?? first;
   return [
     "",
-    `Questions only you can answer (C-3″), ${first === last ? String(first) : `${String(first)}–${String(last)}`}. ` +
+    `Questions only you can answer (C-3⁶), ${first === last ? String(first) : `${String(first)}–${String(last)}`}. ` +
       `Each answer is written to ${DECISION_LOG_PATH} as a decision.`,
     ...screen.flatMap((q) => [
       "",
       `  ${String(q.number)}. ${q.question}`,
       `     why it is yours: ${q.why_asked}`,
-      ...q.options.map((o, i) => `     ${String(i + 1)}) ${o.answer}${i === 0 ? " (recommended)" : ""} — ${o.consequence}`),
+      ...q.options.map((o, i) => `     ${String(i + 1)}) ${o.answer}${i === 0 ? " (recommended)" : ""} — ${o.consequence} (rests on: ${o.basis})`),
     ]),
     "",
   ].join("\n");

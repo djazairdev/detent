@@ -80,7 +80,7 @@ describe("PRDR-282: DECIDE sorts every item AUDIT left open (C-3⁗)", () => {
       ["X-2", REFUND.value],
       ["X-3", "Free in the MVP"],
     ]);
-    expect(log.defaults[0]?.reason).toBe(LATE.reason);
+    expect(log.defaults[0]?.reason).toBe(`${LATE.reason} Rests on: ${LATE.basis}.`);
     expect(log.defaults[2]?.reason).toContain("taken without asking, since off a terminal nobody can be asked (specification decision 9)");
     expect(log.defaults[2]?.reason).toContain("No revenue until pricing lands.");
     expect(parsePack(root, [DECISION_LOG_PATH], { greenfield: false }).problems.filter((p) => p.file === DECISION_LOG_PATH)).toEqual([]);
@@ -126,7 +126,7 @@ describe("PRDR-282: on a terminal, the questions are asked in screens of four (C
     const tty = terminal((screen) => screen.map((q) => (q.number === 2 ? { own: "Tax is on the member." } : { option: q.number === 1 ? 1 : 0 })));
     await initThrough(root, decide(() => artifact({ questions })), { ask: tty.ask });
     expect(tty.screens.map((s) => s.map((q) => q.number))).toEqual([[1, 2, 3]]);
-    expect(tty.screens[0]?.[0]?.options).toEqual(PRICE.options.map((o) => ({ answer: o.answer, consequence: o.consequence })));
+    expect(tty.screens[0]?.[0]?.options).toEqual(PRICE.options.map((o) => ({ answer: o.answer, consequence: o.consequence, basis: o.basis })));
     expect(tty.screens[0]?.[0]?.why_asked).toBe(PRICE.why_asked);
     const log = readDecisionLog(root);
     expect(log.defaults).toEqual([]);
@@ -269,8 +269,8 @@ describe("PRDR-282: in greenfield DECIDE records the stack (D-10′)", () => {
       question: "Which hosting contract does the product run on?",
       why_asked: "Each is a contract with its own monthly cost.",
       options: [
-        { answer: "A managed Node host", consequence: "A monthly fee.", stack: { language: "TypeScript", toolchain: "Node.js 24" } },
-        { answer: "The founder's Go server", consequence: "No new contract.", stack: { language: "Go", toolchain: "Go 1.24", gates: { test: "go test ./..." } } },
+        { answer: "A managed Node host", consequence: "A monthly fee.", basis: "the host's price list", stack: { language: "TypeScript", toolchain: "Node.js 24" } },
+        { answer: "The founder's Go server", consequence: "No new contract.", basis: "the server the founder already runs", stack: { language: "Go", toolchain: "Go 1.24", gates: { test: "go test ./..." } } },
       ],
       settles: ["stack"],
     };

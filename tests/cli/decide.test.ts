@@ -13,8 +13,8 @@ const PRICE: AskedQuestion = {
   question: "Is borrowing free at launch?",
   why_asked: "It is the product's price.",
   options: [
-    { answer: "Free in the MVP", consequence: "No revenue until pricing lands." },
-    { answer: "Two dollars a day", consequence: "The payment rail ships with the MVP." },
+    { answer: "Free in the MVP", consequence: "No revenue until pricing lands.", basis: "the PRD prices nothing" },
+    { answer: "Two dollars a day", consequence: "The payment rail ships with the MVP.", basis: "the roadmap prices borrowing" },
   ],
   ownAllowed: true,
 };
@@ -45,7 +45,7 @@ function scripted(replies: string[]): { io: () => DecideIo; out: string[]; promp
 describe("PRDR-282: a DECIDE screen", () => {
   it("shows each question, why it is the founder's, and its options, the recommended one first", () => {
     const text = renderScreen([PRICE, HOST]);
-    expect(text).toContain("Questions only you can answer (C-3″), 1–2.");
+    expect(text).toContain("Questions only you can answer (C-3⁶), 1–2.");
     expect(text).toContain("  1. Is borrowing free at launch?\n     why it is yours: It is the product's price.");
     expect(text).toContain("     1) Free in the MVP (recommended) — No revenue until pricing lands.");
     expect(text).toContain("     2) Two dollars a day — The payment rail ships with the MVP.");

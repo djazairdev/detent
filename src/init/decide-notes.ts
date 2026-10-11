@@ -57,7 +57,7 @@ export function deferredMessage(questions: readonly DecideQuestion[]): string {
       "",
       `  ${String(n + 1)}. ${q.question}`,
       `     why it is yours: ${q.why_asked}`,
-      ...q.options.map((o, i) => `     ${String(i + 1)}) ${o.answer}${i === 0 ? " (recommended)" : ""} — ${o.consequence}`),
+      ...q.options.map((o, i) => `     ${String(i + 1)}) ${o.answer}${i === 0 ? " (recommended)" : ""} — ${o.consequence} (rests on: ${o.basis})`),
     ]),
     "",
     "To answer, re-run `detent init` on a terminal. Or write each answer as a row under `## Decisions` in " +

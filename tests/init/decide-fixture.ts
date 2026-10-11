@@ -84,15 +84,15 @@ export const PRICE = {
   question: "Is borrowing free at launch, or two dollars a day?",
   why_asked: "It is the product's price, which is counted in money.",
   options: [
-    { answer: "Free in the MVP", consequence: "No revenue until pricing lands." },
-    { answer: "Two dollars a day", consequence: "The payment rail ships with the MVP." },
+    { answer: "Free in the MVP", consequence: "No revenue until pricing lands.", basis: "PRD.md:3, which makes borrowing free" },
+    { answer: "Two dollars a day", consequence: "The payment rail ships with the MVP.", basis: "docs/roadmap.md:4, which prices borrowing from launch" },
   ],
   settles: ["C1"],
 };
-export const LATE = { value: "A late return blocks new loans until the tool is back.", reason: "The queue rule the PRD implies.", settles: ["G1"] };
-export const REFUND = { value: "A refund keeps Stripe's processing fee.", reason: "Stripe's refund documentation, the claim's correction.", settles: ["K1"] };
+export const LATE = { value: "A late return blocks new loans until the tool is back.", reason: "The queue rule the PRD implies.", basis: "reasoning from PRD.md, which lends one tool at a time", settles: ["G1"] };
+export const REFUND = { value: "A refund keeps Stripe's processing fee.", reason: "Stripe's refund documentation, the claim's correction.", basis: "https://docs.stripe.com/refunds", settles: ["K1"] };
 export const TS_STACK = { language: "TypeScript", toolchain: "Node.js 24 with pnpm 10", scaffold_files: ["package.json"], gates: { test: "pnpm test" } };
-export const STACK_DEFAULT = { value: "TypeScript on Node.js 24 with pnpm.", reason: "The documents name no stack; this is the tooling they imply.", settles: ["stack"], stack: TS_STACK };
+export const STACK_DEFAULT = { value: "TypeScript on Node.js 24 with pnpm.", reason: "The documents name no stack; this is the tooling they imply.", basis: "reasoning from the documents, which name no stack", settles: ["stack"], stack: TS_STACK };
 
 /** Every item settled: the price asked, the rest defaulted, and the stack where it is open. */
 export const SORTED = (inputs: Json): Json => {

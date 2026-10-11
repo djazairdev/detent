@@ -31,8 +31,10 @@ const settles = z.array(nonEmptyString).min(1, "settles no item");
 
 export const decideOptionSchema = z.strictObject({
   answer: nonEmptyString,
-  /** What choosing it means: the money, the contract, what the product then does. */
+  /** What choosing it means: what the product then does, protects, promises or costs. */
   consequence: nonEmptyString,
+  /** C-3⁶ (PRDR-339): what the consequence rests on, a source, the passages or the reasoning, since the founder chooses on it. */
+  basis: nonEmptyString,
   /** A question that settles the stack carries one on every option (D-10′). */
   stack: stackEntrySchema.optional(),
 });
@@ -48,10 +50,26 @@ export const decideQuestionSchema = z.strictObject({
 });
 export type DecideQuestion = z.infer<typeof decideQuestionSchema>;
 
+/**
+ * C-3⁶ (PRDR-339): a founder decision a default touches, named as the
+ * documents or the log name it, and whether the default follows it unchanged
+ * or changes it. Code refuses `changes`: a change to a founder decision is the
+ * founder's to make, so it is asked.
+ */
+export const TOUCH_EFFECTS = ["applies", "changes"] as const;
+export const touchSchema = z.strictObject({
+  decision: nonEmptyString,
+  effect: z.enum(TOUCH_EFFECTS),
+});
+export type Touch = z.infer<typeof touchSchema>;
+
 export const decideDefaultSchema = z.strictObject({
   /** The decision, stated as a rule the plan follows. */
   value: nonEmptyString,
   reason: nonEmptyString,
+  /** C-3⁶ (PRDR-339): what settles it, in one line: a primary source, the passages, or the reasoning from them. */
+  basis: nonEmptyString,
+  touches: z.array(touchSchema).default([]),
   settles,
   /** The default that settles the stack carries it (D-10′). */
   stack: stackEntrySchema.optional(),

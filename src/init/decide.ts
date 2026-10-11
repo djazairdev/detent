@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
-import { stateDir, writeArtifact } from "../fs/layout.js";
+import { stateDir } from "../fs/layout.js";
 import { noteUnitComplete } from "../kernel/ledger.js";
 import { SCHEMA_VERSION, parseArtifact } from "../schemas/common.js";
-import { decideArtifactSchema, decideRecordSchema, type DecideArtifact, type DecideQuestion, type DecideRecord } from "../schemas/decide.js";
+import { decideArtifactSchema, type DecideArtifact, type DecideQuestion } from "../schemas/decide.js";
 import { DECISION_LOG_PATH } from "../schemas/pack.js";
 import { isGreenfield } from "./greenfield.js";
 import { checkDecide, openItems, type DecideCheck, type Item } from "./decide-items.js";
+import { readDecideRecord, writeDecideRecord } from "./decide-record.js";
 import { appendToDecisionLog, decisionLogFile, nextId, readDecisionLog, type DecidedStack, type LogAdditions, type LogView } from "./decide-log.js";
 import { decideNotes, deferredMessage } from "./decide-notes.js";
 import { contentsDigest, valueDigest, type PhaseHandler, type PhaseOutcome } from "./machine.js";
@@ -42,7 +43,7 @@ export interface AskedQuestion {
   readonly number: number;
   readonly question: string;
   readonly why_asked: string;
-  readonly options: readonly { readonly answer: string; readonly consequence: string }[];
+  readonly options: readonly { readonly answer: string; readonly consequence: string; readonly basis: string }[];
   /** False for the question that settles the stack: an answer in the founder's own words carries no stack entry (D-10′). */
   readonly ownAllowed: boolean;
 }
@@ -60,24 +61,13 @@ export function decideArtifactPath(root: string): string {
   return path.join(stateDir(root), "state", "decide-artifact.json");
 }
 
-/** Named apart from `DECIDE.json`, the checkpoint, which a case-insensitive file system would take for the same file. */
-const RECORD = "state/decide-record.json";
-
-export function readDecideRecord(root: string): DecideRecord {
-  const empty: DecideRecord = { schema_version: SCHEMA_VERSION, settled: {}, draft: null };
-  const file = path.join(stateDir(root), ...RECORD.split("/"));
-  if (!existsSync(file)) return empty;
-  try {
-    const parsed = parseArtifact(decideRecordSchema, JSON.parse(readFileSync(file, "utf8")));
-    return parsed.ok ? parsed.value : empty;
-  } catch {
-    return empty;
-  }
-}
-
 /** The `expected_output` skeleton; a test parses it through `decideArtifactSchema`, so the two cannot drift. */
 export function decideSkeleton(stackOpen: boolean): Json {
-  const option = (which: string) => ({ answer: `<${which}>`, consequence: "<what choosing it means: the money, the contract, what the product then does>" });
+  const option = (which: string) => ({
+    answer: `<${which}>`,
+    consequence: "<what choosing it means: what the product then does, protects, promises or costs>",
+    basis: "<what that consequence rests on: a primary source, the passages, or your reasoning from them>",
+  });
   const stack = {
     language: "<the bare language name>",
     toolchain: "<the runtime and package manager, with versions>",
@@ -88,15 +78,23 @@ export function decideSkeleton(stackOpen: boolean): Json {
     schema_version: SCHEMA_VERSION,
     questions: [
       {
-        question: "<a decision counted in money or contracts rather than in code>",
-        why_asked: "<why only the founder can answer it>",
+        question: "<a decision that is the founder's by what it affects>",
+        why_asked: "<why it is the founder's>",
         options: [option("the option you recommend"), option("another option")],
         settles: ["<the ids of the items it settles>"],
       },
     ],
     defaults: [
-      { value: "<the decision, stated as a rule the plan follows>", reason: "<why it is defensible: the passages, the source or the practice it follows>", settles: ["<the ids of the items it settles>"] },
-      ...(stackOpen ? [{ value: "<the stack, in one sentence>", reason: "<why this stack>", settles: ["stack"], stack }] : []),
+      {
+        value: "<the decision, stated as a rule the plan follows>",
+        reason: "<why it is defensible: the passages, the source or the practice it follows>",
+        basis: "<what settles it, in one line: a primary source, the passages, or the reasoning from them>",
+        touches: [{ decision: "<a founder decision it touches, as the documents or the log name it>", effect: "applies" }],
+        settles: ["<the ids of the items it settles>"],
+      },
+      ...(stackOpen
+        ? [{ value: "<the stack, in one sentence>", reason: "<why this stack>", basis: "<what settles it>", touches: [], settles: ["stack"], stack }]
+        : []),
     ],
     settled: [{ item: "<an item id>", entry: "<the decision log's id for the entry that already settles it>" }],
   };
@@ -163,7 +161,7 @@ const asked = (q: DecideQuestion, number: number): AskedQuestion => ({
   number,
   question: q.question,
   why_asked: q.why_asked,
-  options: q.options.map((o) => ({ answer: o.answer, consequence: o.consequence })),
+  options: q.options.map((o) => ({ answer: o.answer, consequence: o.consequence, basis: o.basis })),
   ownAllowed: !q.options.some((o) => o.stack !== undefined),
 });
 
@@ -180,6 +178,16 @@ async function askAll(ask: DecideAsk, questions: readonly DecideQuestion[]): Pro
   return answers;
 }
 
+/**
+ * C-3⁶ (PRDR-339): a default's row says what it rests on and which founder
+ * decisions it applies, in its reason, so the log's grammar is unchanged (F-3).
+ * A default that changes one never reaches here: `checkDecide` refuses it.
+ */
+function declaredReason(d: DecideArtifact["defaults"][number]): string {
+  const applied = d.touches.filter((t) => t.effect === "applies").map((t) => t.decision);
+  return [d.reason, `Rests on: ${d.basis}.`, ...(applied.length > 0 ? [`Applies unchanged: ${applied.join("; ")}.`] : [])].join(" ");
+}
+
 /** What the log gains, and which entry settles each item. `answers` is null off a terminal: each recommended option is taken. */
 function settle(sorted: DecideArtifact, answers: readonly DecideAnswer[] | null, log: LogView) {
   const nextD = nextId(log.ids, "D");
@@ -193,7 +201,7 @@ function settle(sorted: DecideArtifact, answers: readonly DecideAnswer[] | null,
   const recommended: string[] = [];
   for (const d of sorted.defaults) {
     const id = nextX(add.defaults.length);
-    add.defaults.push({ id, value: d.value, reason: d.reason });
+    add.defaults.push({ id, value: d.value, reason: declaredReason(d) });
     for (const item of d.settles) by.set(item, id);
     if (d.stack !== undefined) add.stack = { ...d.stack, decision: id };
   }
@@ -258,7 +266,7 @@ export async function decideStage(deps: DecideStageDeps): Promise<PhaseOutcome> 
     .digest("hex");
   const reused = record.draft?.key === key ? record.draft.artifact : null;
   const sorted = reused === null ? await sort(deps, open, log, greenfield) : checkDecide(reused, open, log);
-  writeArtifact(deps.root, RECORD, { ...record, draft: { key, artifact: sorted.kept } });
+  writeDecideRecord(deps.root, { ...record, draft: { key, artifact: sorted.kept } });
 
   const questions = sorted.kept.questions;
   const answers = deps.ask === undefined || questions.length === 0 ? null : await askAll(deps.ask, questions);
@@ -268,7 +276,7 @@ export async function decideStage(deps: DecideStageDeps): Promise<PhaseOutcome> 
   const { add, by, recommended } = settle(sorted.kept, answers, log);
   appendToDecisionLog(deps.root, log, add);
   const settled = Object.fromEntries(open.flatMap((i) => (by.has(i.id) ? [[i.key, by.get(i.id) ?? ""]] : [])));
-  writeArtifact(deps.root, RECORD, { schema_version: SCHEMA_VERSION, settled: { ...record.settled, ...settled }, draft: null });
+  writeDecideRecord(deps.root, { schema_version: SCHEMA_VERSION, settled: { ...record.settled, ...settled }, draft: null });
   const run = {
     asked: add.decisions.map((d) => d.id),
     defaulted: add.defaults.map((d) => d.id).filter((id) => !recommended.includes(id)),

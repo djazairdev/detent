@@ -128,9 +128,11 @@ const stackIn = (q: DecideQuestion): number => q.options.filter((o) => o.stack !
  * Check a DECIDE artifact against the items it was given and the log. Every
  * item is settled once, by a question, a default or an entry the log holds;
  * every id it names is one of the items; only the stack's settler carries a
- * stack, whole; and no question is one the log already answers, in the words
- * C-3‴ can compare. What fails is named in `issues` and taken out of `kept`,
- * and an item left with no settler is `unsorted`.
+ * stack, whole; no question is one the log already answers, in the words
+ * C-3‴ can compare; and no default changes a founder decision it declares it
+ * touches, which is the founder's to make (C-3⁶, PRDR-339). What fails is
+ * named in `issues` and taken out of `kept`, and an item left with no settler
+ * is `unsorted`.
  */
 export function checkDecide(artifact: DecideArtifact, items: readonly Item[], log: LogView): DecideCheck {
   const issues: string[] = [];
@@ -192,6 +194,13 @@ export function checkDecide(artifact: DecideArtifact, items: readonly Item[], lo
     const carries = d.stack !== undefined;
     if (carries !== d.settles.includes("stack") || (carries && !stackOpen)) {
       issues.push(`${who} ${carries ? "carries a stack but does not settle the open stack" : "settles the stack without carrying one"} (D-10′)`);
+      return;
+    }
+    const changed = d.touches.filter((t) => t.effect === "changes").map((t) => t.decision);
+    if (changed.length > 0) {
+      issues.push(
+        `${who} changes the founder decision ${changed.join(", ")}; a change to a founder decision is the founder's to make, so ask it as a question (C-3⁶)`,
+      );
       return;
     }
     const ids = claim(d.settles, who);

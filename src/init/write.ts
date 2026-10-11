@@ -7,7 +7,7 @@ import { SCHEMA_VERSION, parseArtifact } from "../schemas/common.js";
 import { CONFORMANCE_RECORD_PATH, DECISION_LOG_PATH, PACK_PATHS } from "../schemas/pack.js";
 import { writeArtifactSchema, type WriteArtifact } from "../schemas/write.js";
 import { isGreenfield } from "./greenfield.js";
-import { readDecideRecord } from "./decide.js";
+import { readDecideRecord } from "./decide-record.js";
 import { openItems } from "./decide-items.js";
 import { decisionLogFile, nextId, readDecisionLog, type LogView } from "./decide-log.js";
 import { discoverDocs, docPatternsFor } from "./discover-docs.js";

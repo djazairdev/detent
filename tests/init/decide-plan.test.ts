@@ -168,7 +168,7 @@ describe("PRDR-282: DECIDE stands off the chain, so AUDIT's re-runs re-plan only
     const root = repo(PROJECT);
     const log: string[] = [];
     const planner = scriptedPlanner({ slices: TWO_SLICES, draft: twoSliceDraft, review: approve }, log);
-    const stub = decide((n, i) => (n === 0 ? SORTED(i) : artifact({ settled: [{ item: "G1", entry: "X-1" }], defaults: (i["items"] as { id: string }[]).some((x) => x.id === "R1") ? [{ value: "The plan follows the PRD: borrowing is free.", reason: "The PRD is the later intent.", settles: ["R1"] }] : [] })));
+    const stub = decide((n, i) => (n === 0 ? SORTED(i) : artifact({ settled: [{ item: "G1", entry: "X-1" }], defaults: (i["items"] as { id: string }[]).some((x) => x.id === "R1") ? [{ value: "The plan follows the PRD: borrowing is free.", reason: "The PRD is the later intent.", basis: "PRD.md:3", settles: ["R1"] }] : [] })));
     await initThrough(root, stub, { all: true, script: { ...planning(planner) }, more: approved });
     let edits = 0;
     const again = async (survey: Json) => {
