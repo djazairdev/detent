@@ -20,8 +20,8 @@ Kept for the reasoning behind decisions, not current:
 
 - [implementation-plan.md](implementation-plan.md): the version 2 plan. `npm run parity` still reads it.
 - [detent-prd-v2.md](../detent-prd-v2.md): the version 2 PRD, which version 3 builds on.
-- [plan-specification-phase.md](plan-specification-phase.md), [plan-planning-redesign.md](plan-planning-redesign.md), [plan-cost-strategy.md](plan-cost-strategy.md): design plans, since recorded in the PRD.
-- [plan-contracts-and-symbols.md](plan-contracts-and-symbols.md): a proposal, not yet built.
-- [planning-phase-audit-2026-09-26.md](planning-phase-audit-2026-09-26.md): an audit of the planning phase.
+- [plan-specification-phase.md](history/plan-specification-phase.md), [plan-planning-redesign.md](history/plan-planning-redesign.md), [plan-cost-strategy.md](history/plan-cost-strategy.md): design plans, since recorded in the PRD.
+- [plan-contracts-and-symbols.md](history/plan-contracts-and-symbols.md): a proposal, not yet built.
+- [planning-phase-audit-2026-09-26.md](history/planning-phase-audit-2026-09-26.md): an audit of the planning phase.
 - [research/](research/): background research.
 - [../archive/prd-review/](../archive/prd-review/): the review records from before October 2026.

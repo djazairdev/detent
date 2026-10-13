@@ -12,7 +12,8 @@ by `npm run rules:check` — grab-bag filenames, TODO markers without an issue n
 `node:` prefixes, and `.js` specifiers. The rest need a reader, and the checker
 names them rather than implying a green run means full compliance. When a rule
 here collides with the PRD or the implementation plan, the PRD wins and this
-file gets fixed.
+file gets fixed. You don't need to read the PRD to contribute: the issue you
+pick says where to start, and [docs/architecture.md](docs/architecture.md) maps the code.
 
 ## Files
 

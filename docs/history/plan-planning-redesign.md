@@ -5,8 +5,8 @@ C-8⁵, D-5′, V-5′, N-5′, D-32 and D-33); PRDR-290 … PRDR-298 build it; 
 plan and the PRD differ, the PRD wins, and PRDR-278 lists what it settled that this plan left
 open.
 **Prerequisite (N-6):** PRDR-278 lands before any code. It is the one PRD amendment for this plan and
-for `docs/plan-specification-phase.md`, by the operator's decision.
-**Evidence:** `docs/planning-phase-audit-2026-09-26.md`.
+for `docs/history/plan-specification-phase.md`, by the operator's decision.
+**Evidence:** `docs/history/planning-phase-audit-2026-09-26.md`.
 **Decided by:** the operator, 2026-09-26, after that audit (§2).
 
 ---
@@ -264,7 +264,7 @@ ksarjs's pack (2,024 requirements) is larger still.
 
 ## 12. The specification phase, adjusted
 
-`docs/plan-specification-phase.md` now reads with these changes:
+`docs/history/plan-specification-phase.md` now reads with these changes:
 - VALIDATE hands the pack to DETERMINE_VERIFICATION.
 - Decision 6's conforming pack goes straight on to DETERMINE_VERIFICATION.
 - DECIDE records the stack in greenfield.

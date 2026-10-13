@@ -66,10 +66,11 @@ every release walks [the release checklist](docs/release-checklist.md).
 
 ## Quick start
 
-You need [Claude Code](https://docs.claude.com/en/docs/claude-code) and
-Node.js 22 or later. Sessions run on your Claude login, or on an API key in
-`ANTHROPIC_API_KEY`, and spend its usage: `init` estimates the cost of each
-costly step before it starts.
+You need [Claude Code](https://docs.claude.com/en/docs/claude-code),
+Node.js 22 or later, and git. Sessions run on your Claude login, or on an API
+key in `ANTHROPIC_API_KEY`, and every one spends real usage: on a real project,
+a single review session cost between $3 and $9, and `init` runs many. It
+estimates the cost of each costly step before it starts.
 
 1. Install the plugin:
 

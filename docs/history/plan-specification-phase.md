@@ -8,7 +8,7 @@ C-3′ ("Planning does not stop for a question") and the `init` pipeline, and N-
 rule forbids changing either in flight.
 **Decided by:** the operator, 2026-09-26, in the design discussion that followed the ksarjs
 specification (§2).
-**Companion:** `docs/plan-planning-redesign.md` rebuilds the planning phase on the pack this phase
+**Companion:** `docs/history/plan-planning-redesign.md` rebuilds the planning phase on the pack this phase
 produces. The operator put both in the same PRD amendment, PRDR-278. One consequence runs through
 this plan: ANALYZE is folded into DECIDE, so the pack goes from VALIDATE to DETERMINE_VERIFICATION.
 
@@ -322,4 +322,4 @@ first N-7 run and the ksar-cloud re-plan will measure it.
 | PRDR-289 | Fix sessions may declare a false premise: X-3's new rows | PRDR-278 |
 
 The planning redesign's tickets, PRDR-290 to PRDR-298, are listed in
-`docs/plan-planning-redesign.md` §14.
+`docs/history/plan-planning-redesign.md` §14.

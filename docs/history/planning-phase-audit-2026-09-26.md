@@ -6,7 +6,7 @@
 the live runs and experiments, and the contract with the model. I re-checked each report's
 load-bearing claims against the code, the logs and the ksar-cloud state before relying on them.
 Anything marked INFERENCE was not verified.
-**Outcome:** the operator's decisions of the same day, recorded in `docs/plan-planning-redesign.md`.
+**Outcome:** the operator's decisions of the same day, recorded in `docs/history/plan-planning-redesign.md`.
 
 ---
 
