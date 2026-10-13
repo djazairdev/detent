@@ -7,24 +7,27 @@
 [![Good first issues](https://img.shields.io/github/issues/djazairdev/detent/good%20first%20issue?label=good%20first%20issues&color=7057ff)](https://github.com/djazairdev/detent/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
 [![Improvements](https://img.shields.io/github/issues/djazairdev/detent/enhancement?label=improvements&color=a2eeef)](https://github.com/djazairdev/detent/issues?q=is%3Aissue+is%3Aopen+label%3Aenhancement+sort%3Areactions-%2B1-desc)
 
-Detent turns planning documents into merged, reviewed, test-gated code using
-fresh, single-purpose Claude Code sessions whose every consequential move is
-admitted by a deterministic referee.
+Detent builds software from your plans with Claude Code, and keeps the AI on a
+short leash.
 
-Planning tools (spec-kit, Superpowers, BMAD and their peers) write excellent
-documents. Those documents are Detent's *input*. Detent is the referee
-underneath that layer: it makes the run auditable, budgeted, and contained,
-whichever way the plan was written.
+You write down what you want built: a spec, a PRD, or a plan from a tool like
+spec-kit, Superpowers or BMAD. Detent turns it into small tasks and has Claude
+Code do them one at a time. You approve the plan before anything starts. Each
+task gets a fresh session, your project's own tests decide whether it worked,
+and a second session reviews the work before it counts. When Detent can't fix
+something itself, it stops and hands it to you.
 
-- **An auditable state machine**: every admitted transition is journaled to
-  `transitions.jsonl`; the run's ground truth is never a chat log.
-- **Hard budgets**: attempt and spend ceilings you set yourself; a ceiling
-  never auto-retries, it presents a human decision.
-- **Verification bound to your project, with drift halts**: Detent executes
-  your repo's own test/lint/build commands, and halts for re-baselining if
-  they change mid-run.
-- **Per-ticket write containment**: a deny-enforced hook holds every session
-  inside its ticket's declared surface; allow-rules cannot shadow it.
+Every step is decided by a *referee*: plain code, not an AI. That's what makes
+it different from letting an agent run on its own:
+
+- **You can see everything it did.** Every step is written to a log file you
+  can read, not buried in a chat.
+- **It can't overspend.** You set limits on attempts and money. When one is
+  reached, Detent stops and asks you instead of trying again.
+- **Your tests are the judge.** It runs your project's own test, lint and build
+  commands, and stops if they change during a run.
+- **It stays in its lane.** Each session can only change the files its task
+  names, and no permission setting can override that.
 
 Detent is held to the standard it enforces: every change to Detent lands
 through a pull request that must pass its six checks on Node 22 and 24, and
