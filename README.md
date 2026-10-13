@@ -21,7 +21,8 @@ something itself, it stops and hands it to you.
 flowchart TD
     P["your plans"] --> I["/detent:init<br>turns them into small tasks"]
     I --> A{"you approve the plan"}
-    A --> T["next task"]
+    A --> R["/detent:run<br>works through the tasks"]
+    R --> T["next task"]
     T --> S["a fresh Claude Code session<br>changes only the task's files"]
     S --> G{"your tests, lint and build"}
     G -- pass --> V{"a second session reviews"}
@@ -39,7 +40,7 @@ flowchart TD
     classDef verify fill:#34d399,stroke:#047857,color:#1f2937
     classDef fix fill:#f87171,stroke:#b91c1c,color:#1f2937
     class P,A,H you
-    class I,T,S,D machine
+    class I,R,T,S,D machine
     class G,V,K verify
     class F fix
 ```
