@@ -128,7 +128,7 @@ You can help without writing code, too: improve the docs, or run Detent on a pro
 - [Propose a new project](https://github.com/djazairdev/djazair.dev/discussions/categories/ideas)
 - Follow djazairdev on [Facebook](https://www.facebook.com/djazairdev) and [X](https://x.com/djazairdev) for news
 
-Ask in Arabic, Tamazight, French or English. Code, docs and issue titles are in English, so everyone can search them. Report security problems [privately](https://github.com/djazairdev/detent/security/policy), never in an issue.
+Report security problems [privately](https://github.com/djazairdev/detent/security/policy), never in an issue.
 
 ## License
 
