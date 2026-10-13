@@ -1,6 +1,6 @@
 # How Detent works, in detail
 
-The [README](../README.md) gives each phase in a sentence. This page has the full detail, for when you need it.
+The [golden path](golden-path.md) gives each phase in a sentence. This page has the full detail, for when you need it.
 
 ## What `detent init` does, phase by phase
 

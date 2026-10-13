@@ -1,6 +1,6 @@
 # Using Detent
 
-Moved from the README, which keeps the golden path.
+Moved from the README. The two commands are in [golden-path.md](golden-path.md).
 
 ## Works with existing and new projects
 

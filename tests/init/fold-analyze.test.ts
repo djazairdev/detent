@@ -156,12 +156,12 @@ describe("PRDR-290: the phase list (D-10′)", () => {
     ]);
   });
 
-  it("is the list the README and the init skill give, in order, with its count in words", () => {
+  it("is the list the golden-path guide and the init skill give, in order, with its count in words", () => {
     const words: Record<number, string> = { 11: "eleven", 12: "twelve" };
     const count = words[INIT_PHASES.length] ?? String(INIT_PHASES.length);
-    const readme = readFileSync("README.md", "utf8");
-    const start = readme.indexOf("`init` runs");
-    const golden = readme.slice(start, readme.indexOf("detent run", start));
+    const guide = readFileSync("docs/golden-path.md", "utf8");
+    const start = guide.indexOf("`init` runs");
+    const golden = guide.slice(start, guide.indexOf("detent run", start));
     expect(golden).toContain(`\`init\` runs ${count} phases, in order.`);
     expect([...golden.matchAll(/^- \*\*([A-Z_]+)\*\*:/gmu)].map((m) => m[1])).toEqual([...INIT_PHASES]);
     const skill = readFileSync("skills/init/SKILL.md", "utf8");

@@ -2,6 +2,7 @@
 
 | Document | What it is |
 |---|---|
+| [golden-path.md](golden-path.md) | The two commands, `init` and `run`, and each phase of `init` in a sentence |
 | [using-detent.md](using-detent.md) | How to use Detent on an existing or a new project, and what it does to your working tree |
 | [how-it-works.md](how-it-works.md) | Each phase of `detent init` in full, the cost estimates, and model routing in detail |
 | [architecture.md](architecture.md) | How the code is organised: start here to find your way around `src/` |
