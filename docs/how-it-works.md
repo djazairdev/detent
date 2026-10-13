@@ -1,6 +1,6 @@
 # How Detent works, in detail
 
-The [golden path](golden-path.md) gives each phase in a sentence. This page has the full detail, for when you need it.
+The [golden path](golden-path.md) gives each phase in a sentence. This page has the full detail, for when you need it. Model routing is in the [reference](reference.md#models).
 
 ## What `detent init` does, phase by phase
 
@@ -40,35 +40,3 @@ reviewers cache it, and the rest read it from the cache, so a review costs about
 default stays `read`: on Detent's review set, reviewers handed the foundations found every
 blocker but only 113 of its 132 majors, where reviewers reading them found 124. Switching a
 stopped `init` to `given` reviews again the areas its round had already kept.
-
-## Models in detail
-
-The default routing is the table in the README's [Models](../README.md#models) section.
-
-A config written by an earlier Detent
-keeps its own routing: `detent doctor`, and `init` and `run` before their first
-session, name each role still on a model a newer default supersedes, with the
-line that moves it. Sessions run on the Claude Code the Agent SDK bundles, not
-the `claude` on your PATH, so `doctor` also fails on a routed model that
-runtime cannot serve.
-
-A role that runs several tasks can have one of them routed apart under a
-`role/task` key of `effort_routing`, such as `audit/verify_claims` for AUDIT's
-claim checks; its other tasks keep the role's level. A first `init` names the
-keys. The defaults route a task below its role's level only after it meets the
-bar on Detent's evaluation sets, and one has: a VALIDATE reviewer's first-round
-review (`spec_review/review`) runs at `high`, which found every blocker of the
-review set, and 124 of its 132 majors where `max` found 126, for less than half
-of what `max` spent. A verification stays at `max`. A config written by an
-earlier Detent keeps its first-round reviews at `max` until
-`"spec_review/review": "high"` is added to its `effort_routing`. AUDIT's claim
-checks stay at `max` too, since no cheaper setup found every wrong claim, and
-nor did `max` itself on a second run.
-
-In `run`, a ticket's risk and Detent's own checks raise these levels, and never
-lower them. A ticket the plan labels risky, or whose surface meets a glob of the
-config's `risk` list, runs its implement, fix and review sessions at `max`. Each
-attempt that fails a gate, has its premise falsified, or is sent back by its
-review runs the ticket's next implement or fix session one level higher, up to
-`max`, and says so on the ticket. A ticket whose surface meets one that stopped
-for you or was falsified earlier in the run starts one level higher.

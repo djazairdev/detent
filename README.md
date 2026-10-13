@@ -68,26 +68,8 @@ costly step before it starts.
 
 What each step does is in [docs/golden-path.md](docs/golden-path.md). Using
 Detent on an existing or a new project, and what it does to your working tree,
-is in [docs/using-detent.md](docs/using-detent.md).
-
-## Models
-
-Every session runs on Claude Opus 5.5 or Claude Sonnet 5.5. `init` writes this
-routing to `.detent/config.json`:
-
-| Roles | Model | Effort |
-|---|---|---|
-| `planner`, `plan_review`, `audit`, `spec_write`, `spec_review` | `claude-opus-5-5` | `max` |
-| `review`, `diagnose`, `informed_fix` | `claude-opus-5-5` | `xhigh` |
-| `implement`, `blind_fix`, `review_fix`, `research` | `claude-sonnet-5-5` | `xhigh` |
-
-The roles that judge, plan and specify run on Opus; the roles that write code
-run on Sonnet. Edit `model_routing` and `effort_routing` in
-`.detent/config.json` to change either.
-
-Per-task routing, how a ticket's risk raises these levels, and what happens to
-a config an earlier Detent wrote are in
-[docs/how-it-works.md](docs/how-it-works.md#models-in-detail).
+is in [docs/using-detent.md](docs/using-detent.md). The models it runs, its exit
+codes and the plumbing commands are in [docs/reference.md](docs/reference.md).
 
 ## What Detent will never do
 
@@ -96,46 +78,6 @@ a config an earlier Detent wrote are in
 - Redefine a gate mid-run: if a verification command changes in flight,
   Detent halts and asks you to re-baseline.
 - Own your tooling: `.detent/` never contains your project's configuration.
-
-## Exit codes
-
-`run` exit codes are public API:
-
-| Code | Meaning |
-|---|---|
-| `0` | plan complete |
-| `10` | human-gated items remain |
-| `2` | not ready (no or unapproved plan, binding drift) |
-| `1` | error |
-
-## Plumbing
-
-Documented, scriptable, and never required on the golden path ([docs/golden-path.md](docs/golden-path.md)):
-`detent status`, `detent report`, `detent doctor`, `detent approve <id>`,
-`detent requeue <id>`, `detent unclaim <id>`, `detent amend <AM-id>`, `detent verify sync`,
-`detent verify lifecycle`.
-
-`detent verify lifecycle` lists the lifecycle scripts a project's manifests declare (`postinstall`,
-`prepare`, a gate's `pretest`, and the rest npm runs), each with its body and hash. Detent runs
-none of them, until an operator approves a body with `--approve <script>`. A run then executes
-that body where npm would have, and an edited body waits for a new approval.
-
-`detent amend <AM-id>` shows an amendment a session filed against the specification pack, and
-decides it with `--approve`, `--edit <file>` or `--reject <reason>`. An applied amendment waits for
-`detent init`, which re-validates the pack and re-plans the slices it changed.
-
-`detent status` also shows how the plan is running, for the plan and for each
-slice: tickets done, and done in their first generation, stops for you,
-falsifications by cause, budget breaches, review rounds, cost and time at work,
-with the builds that made the plan and its pack; then what `init` spent on each
-phase. A run records the same figures in its journal when it ends. They are
-evidence for deciding which planning mechanisms stay, and they gate nothing.
-`detent status` then counts `run`'s sessions by why each ran at its level:
-its role's, raised for its ticket's risk, or raised by evidence, with what each
-group cost.
-While `init` is in a costly step, `detent status` shows the step, the units done
-and left, what they have spent so far, and an estimated finish from the figures
-its note gave; after a stop, it shows the step the stop left and how far it got.
 
 ## Make your first contribution
 

@@ -57,9 +57,8 @@ Some files are generated. If a check says one is stale, regenerate it and commit
 Some passages state what the code does, and tests check that they still match it. If you change one, change the code or the test with it, or CI fails:
 
 - **README, Quick start:** the install commands, and `/detent:init` and `/detent:run` as the only Detent commands.
-- **README, Models:** each row of the table names a role, its model and its level, as the code routes them.
-- **README, Exit codes:** each row matches its code.
-- **README, Plumbing and What Detent will never do:** the plumbing commands are listed, and the four refusals are stated.
+- **README, What Detent will never do:** the four refusals are stated.
+- **[docs/reference.md](docs/reference.md):** each row of the Models table names a role, its model and its level, as the code routes them; each exit code's row matches its code; and the plumbing commands are listed.
 - **[docs/golden-path.md](docs/golden-path.md):** only `detent init` and `detent run` appear in its commands; `init`'s phases are listed in order, with the sentence that counts them; and the three numbers measured for the `read` default (113, 132 and 124).
 
 Wording elsewhere is free to change.

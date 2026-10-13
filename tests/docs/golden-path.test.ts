@@ -17,6 +17,7 @@ import { EXIT_ERROR, EXIT_HUMAN_GATED, EXIT_NOT_READY, EXIT_OK } from "../../src
 const SRC = fileURLToPath(new URL("../../src", import.meta.url));
 const README = readFileSync("README.md", "utf8");
 const GUIDE = readFileSync("docs/golden-path.md", "utf8");
+const REFERENCE = readFileSync("docs/reference.md", "utf8");
 
 /** Every fenced bash block in the golden-path guide. */
 function goldenPathCommands(): string[] {
@@ -44,19 +45,19 @@ describe("T-069 C-14: the porcelain is exactly two commands", () => {
   });
 
   it("plumbing is documented but explicitly OFF the golden path (C-12)", () => {
-    const plumbing = README.slice(README.indexOf("## Plumbing"));
+    const plumbing = REFERENCE.slice(REFERENCE.indexOf("## Plumbing"));
     expect(plumbing).toContain("never required on the golden path");
     for (const verb of ["status", "report", "doctor", "approve", "requeue", "unclaim", "verify sync"]) {
       expect(plumbing, verb).toContain(verb);
     }
   });
 
-  it("the README documents C-11's exit codes as public API", () => {
+  it("the reference documents C-11's exit codes as public API", () => {
     /**
      * PRDR-172: the code must be PAIRED with its meaning.
      *
      * This checked four backtick-wrapped digits were present somewhere in the
-     * file. Scrambling all four rows of the README's exit-code table, so every
+     * file. Scrambling all four rows of the exit-code table, so every
      * code named the wrong outcome, left all 13 tests green — including this
      * one, titled "the README documents C-11's exit codes as public API".
      * Each row is now matched against the constant it documents.
@@ -68,11 +69,11 @@ describe("T-069 C-14: the porcelain is exactly two commands", () => {
       ["EXIT_HUMAN_GATED", EXIT_HUMAN_GATED, /human|escalat|gated/i],
     ];
     for (const [name, code, meaning] of rows) {
-      const line = README.split("\n").find((l) => new RegExp(`\\\`${code}\\\``).test(l) && /\|/.test(l));
-      expect(line, `${name} (${code}) has no row in the README's exit-code table`).toBeDefined();
-      expect(line ?? "", `the README's row for ${code} does not describe ${name}`).toMatch(meaning);
+      const line = REFERENCE.split("\n").find((l) => new RegExp(`\\\`${code}\\\``).test(l) && /\|/.test(l));
+      expect(line, `${name} (${code}) has no row in the reference's exit-code table`).toBeDefined();
+      expect(line ?? "", `the reference's row for ${code} does not describe ${name}`).toMatch(meaning);
     }
-    expect(README).toContain("public API");
+    expect(REFERENCE).toContain("public API");
   });
 });
 

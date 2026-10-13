@@ -9,7 +9,7 @@ import { readEditsFile } from "./escalate.js";
  * T-055 — `detent approve <id>` and `detent requeue <id>` (C-12).
  *
  * Thin: parse, call the kernel's plumbing, print, map the exit code. The
- * README golden path contains exactly two commands; these are documented,
+ * golden path (docs/golden-path.md) has exactly two commands; these are documented,
  * scriptable, and never required on it.
  */
 
