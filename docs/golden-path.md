@@ -34,39 +34,65 @@ detent run
 
 ```mermaid
 flowchart TD
-    I["detent init"] --> A{"your approval"}
+    I["detent init"] --> A{"you approve the plan"}
     A --> R["detent run"]
-    R --> C["claim next ticket"]
-    C --> S["fresh session<br>contained to the ticket's surface"]
-    S --> G{"your own gates<br>test · lint · build"}
+    R --> C["claim the next ready ticket"]
+    C -- feature --> S["implement<br>a fresh session, held to the ticket's files"]
+    C -- bug --> DG["diagnose<br>a cause, and a repro Detent runs itself"]
+    DG -- "repro fails as predicted" --> S
+    DG -- "repro wrong, try again" --> DG
+    S --> G{"your gates<br>test · lint · build"}
+    S -- "needs another ticket's work" --> W["back in the queue<br>until that ticket is done"]
+    W --> C
     G -- green --> V{"independent review"}
-    G -- red --> L["fix ladder<br>blind → research → informed"]
+    G -- red --> L["fix ladder<br>blind fix → research → informed fix"]
     L --> G
-    L -- exhausted --> H["you<br>dossier in hand, requeue at will"]
-    H --> C
-    V -- changes --> S
-    V -- approve --> D["DONE<br>finalized on the run branch"]
+    V -- "changes, rounds left" --> RF["review fix"]
+    RF --> G
+    V -- approve --> K{"close check<br>risk paths, then every gate again"}
+    K -- red --> L
+    K -- green --> D["DONE<br>merged into the run branch"]
     D --> C
+    L -- "ladder spent" --> H["you<br>a dossier in hand: approve or requeue"]
+    V -- "changes, no rounds left" --> H
+    S -- "premise false, or too big" --> H
+    K -- "touches a risk path" --> H
+    H -- approve --> K
+    H -- requeue --> C
 
     classDef you fill:#fbbf24,stroke:#b45309,color:#1f2937
     classDef machine fill:#6366f1,stroke:#4338ca,color:#ffffff
     classDef verify fill:#34d399,stroke:#047857,color:#1f2937
     classDef ladder fill:#f87171,stroke:#b91c1c,color:#1f2937
     class A,H you
-    class I,R,C,S,D machine
-    class G,V verify
+    class I,R,C,S,DG,W,RF,D machine
+    class G,V,K verify
     class L ladder
 ```
 
-`run` takes the next ticket and starts a fresh Claude Code session that may
-change only the files the ticket names. Then it runs your project's own
-tests, lint and build. When they pass, a separate session reviews the change.
-When they fail, Detent tries to fix it, first directly, then after researching
-the failure, and hands the ticket to you if nothing works.
+`run` takes the next ticket whose dependencies are done, and starts a fresh
+Claude Code session that may change only the files the ticket names. A bug
+ticket starts with a diagnosis: a session proposes the cause and a repro,
+Detent runs the repro itself, and the fix starts only once it fails as
+predicted.
+
+Then Detent runs your project's own tests, lint and build. When they pass, a
+separate session reviews the change, and the changes it asks for buy a set
+number of review-fix rounds. When they fail, Detent climbs the fix ladder: a
+second attempt, then a session that researches the failure, then a fix informed
+by that research.
+
+Before a ticket is done, the close check asks for your approval if the change
+touches a path you listed as risky (`risk` in `.detent/config.json`), then runs
+every gate again. The ticket is then merged into the run branch.
+
+A session can also stop on what it finds. A ticket that needs another ticket's
+work goes back in the queue until that work is done. A false premise, or a
+ticket too big for one session, comes to you.
 
 Amber is you; indigo is Detent; green is checking; red is fixing. The
 *referee*, plain code and not a model, decides every move, and records each one
-in `transitions.jsonl`. A limit you set, on attempts or on spending, hands
-the ticket to you and is never retried, and a ticket labelled risky waits for your approval before it's
-done.
-
+in `transitions.jsonl`. At any step, a limit you set, on attempts or on
+spending, hands the ticket to you and is never retried. A gate command that
+changes mid-run blocks the ticket until you re-baseline it with
+`detent verify sync` and requeue it.
