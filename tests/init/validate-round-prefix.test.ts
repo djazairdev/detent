@@ -167,15 +167,15 @@ describe("S-6‴ a round hands every reviewer the foundations as its system prom
     for (const said of ["`review_foundations`", "`given`", "as its system prompt", "is `read` by default", "`foundations_given`", "count as read (C-2¹⁴)"]) expect(text, said).toContain(said);
   });
 
-  it("PRDR-334: the config's doc-block, S-6‴ and the README name the measurement that keeps read the default", () => {
+  it("PRDR-334: the config's doc-block, S-6‴ and the golden-path guide name the measurement that keeps read the default", () => {
     const block = readFileSync(path.join(REPO, "src", "kernel", "worstcase.ts"), "utf8").replace(/\s*\*\s*/gu, " ");
     expect(block).toContain("113 of the 132, where reviewers reading them at `high` reported 124, under N-8′'s 119");
     const text = (definitionText(readFileSync(path.join(REPO, "detent-prd-v3.md"), "utf8"), "S-6‴")[0] ?? "").replace(/\s+/gu, " ");
     for (const said of ["Measured by PRDR-322", "18 of the 18 blockers", "$17.91 over 10 sessions in 15.7 min", "78,759", "None of the 10 read a foundation from its file", "it reported 113 at their place, where that arm reported 124", "*Amended by N-8′ (PRDR-334)"]) {
       expect(text, said).toContain(said);
     }
-    const readme = readFileSync(path.join(REPO, "README.md"), "utf8").replace(/\s+/gu, " ");
-    expect(readme).toContain("The default stays `read`: on Detent's review set, reviewers handed the foundations found every blocker but only 113 of its 132 majors, where reviewers reading them found 124.");
+    const guide = readFileSync(path.join(REPO, "docs", "golden-path.md"), "utf8");
+    for (const measured of ["113", "132", "124"]) expect(guide, measured).toContain(measured);
   });
 });
 

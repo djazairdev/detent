@@ -24,9 +24,8 @@ import { HEURISTIC, at, byPlace, coverage, milestoneOrder, presentIndicative, re
 export type PackCheck = ConformanceRecord["checker"];
 
 /**
- * What a green result does not mean, printed with every result, as
- * `scripts/check-tickets.ts` (PRDR-192) prints its own. Each is a property a
- * reader could assume was checked and was not.
+ * What a green result does not mean, printed with every result. Each is a
+ * property a reader could assume was checked and was not.
  */
 export const UNCHECKED: readonly string[] = [
   "whether the pack is right: a pack that is consistent and wrong passes; meaning is for VALIDATE's reviewers",

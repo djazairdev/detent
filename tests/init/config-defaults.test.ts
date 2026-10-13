@@ -67,16 +67,16 @@ describe("PRDR-114 init writes the model routing", () => {
 });
 
 /**
- * S-5⁶ (PRDR-319): the README says which role runs on which model, at which
+ * S-5⁶ (PRDR-319): the reference (docs/reference.md) says which role runs on which model, at which
  * level, as the code routes it. A table typed by hand drifts the day a default
  * moves, so each row is read back and joined to the code's two tables.
  */
-describe("S-5⁶ the README states the default routing as the code has it", () => {
+describe("S-5⁶ the reference states the default routing as the code has it", () => {
   it("names every role once, with its model and its level", () => {
-    const readme = readFileSync("README.md", "utf8");
-    const start = readme.indexOf("\n## Models\n");
-    expect(start, "the README has a Models section").toBeGreaterThan(-1);
-    const section = readme.slice(start, readme.indexOf("\n## ", start + 1));
+    const reference = readFileSync("docs/reference.md", "utf8");
+    const start = reference.indexOf("\n## Models\n");
+    expect(start, "the reference has a Models section").toBeGreaterThan(-1);
+    const section = reference.slice(start, reference.indexOf("\n## ", start + 1));
     const stated = new Map<string, readonly [string, string]>();
     for (const row of section.matchAll(/^\| ((?:`[a-z_]+`(?:, )?)+) \| `(claude-[a-z0-9-]+)` \| `([a-z]+)` \|$/gmu)) {
       for (const role of (row[1] ?? "").matchAll(/`([a-z_]+)`/gu)) {

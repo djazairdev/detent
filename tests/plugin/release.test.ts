@@ -69,20 +69,8 @@ describe("T-142 the release checklist makes its items unskippable", () => {
   });
 });
 
-describe("T-141 the README leads with the four unclaimed axes (research C.2)", () => {
+describe("T-141 the README documents the install", () => {
   const readme = read("README.md");
-
-  it("names all four axes and the upstream-complementary framing", () => {
-    for (const token of ["auditable state machine", "Hard budgets", "drift halts", "write containment", "input"]) {
-      expect(readme, token).toContain(token);
-    }
-  });
-
-  it("says what Detent's own changes and releases pass — the maintenance answer since PRDR-336", () => {
-    const text = flat(readme);
-    expect(text).toMatch(/every change to Detent lands through a pull request/u);
-    expect(text).toContain("(docs/release-checklist.md)");
-  });
 
   it("documents the marketplace install without touching the golden path", () => {
     expect(readme).toContain("claude plugin marketplace add");

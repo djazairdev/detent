@@ -8,17 +8,28 @@ Thanks for helping. Newcomers are welcome: you don't need to be an expert, and n
 
 - Issues labelled [good first issue](https://github.com/djazairdev/detent/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) are small and well described. [help wanted](https://github.com/djazairdev/detent/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22) issues need more context but are ready for anyone.
 - Comment on the issue to say you're working on it, so no one else starts the same thing. If you stop, say so.
-- For anything bigger than a small fix, open an issue first and agree on the approach.
+- Found a bug, or have an idea? [Open an issue](https://github.com/djazairdev/detent/issues/new/choose). That's all it takes: there's no separate form or record to file, and no approval step before you start on an issue labelled for help.
+- For anything bigger than a small fix, say in the issue how you'd do it, so we agree on the approach before you spend time on it.
 
 ## Set up
 
-Detent is a Claude Code plugin written in TypeScript. You need Node.js 22 or later.
+Detent is a Claude Code plugin written in TypeScript. You need:
+
+- Node.js 22 or later;
+- git, which the tests use to make scratch repositories.
+
+You don't need a Claude account or an API key to develop Detent: the tests never call a model. You need the [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) and an account only to try your change on a real project: load your checkout with `claude --plugin-dir /path/to/detent`.
+
+[Fork the repository](https://github.com/djazairdev/detent/fork), then clone your fork and make a branch:
 
 ```bash
-git clone https://github.com/djazairdev/detent
+git clone https://github.com/<your-username>/detent
 cd detent
 npm ci
+git switch -c fix-the-thing
 ```
+
+New to the code? [docs/architecture.md](docs/architecture.md) says what each folder of `src/` does, and [docs/README.md](docs/README.md) says which documents are current.
 
 ## Run the checks
 
@@ -27,23 +38,41 @@ The same commands CI runs on every pull request, on Node 22 and 24:
 ```bash
 npm run parity:check    # the parity report and the critical path are up to date
 npm run prompts:check   # prompts/manifest.json pins the hash of every role prompt
+npm run rules:check     # the AGENTS.md rules lint doesn't reach
 npm run lint
 npm run typecheck
 npm test
 ```
 
-If `parity:check` or `prompts:check` fails, run `npm run parity` or `npm run prompts` to regenerate the file, and commit it with your change.
+Some files are generated. If a check says one is stale, regenerate it and commit it with your change:
+
+| The check says | Run |
+|---|---|
+| `parity:check` fails | `npm run parity` |
+| `prompts:check` fails | `npm run prompts` (you changed a file in `prompts/`) |
+| `agents/<role>.md is stale` or the hook bundle is stale | `npm run plugin` (you changed a prompt, a role's tools or `src/plugin/`) |
+
+### Docs that tests compare with the code
+
+Some passages state what the code does, and tests check that they still match it. If you change one, change the code or the test with it, or CI fails:
+
+- **README, Quick start:** the install commands, and `/detent:init` and `/detent:run` as the only Detent commands.
+- **README, What Detent will never do:** the four refusals are stated.
+- **[docs/reference.md](docs/reference.md):** each row of the Models table names a role, its model and its level, as the code routes them; each exit code's row matches its code; and the plumbing commands are listed.
+- **[docs/golden-path.md](docs/golden-path.md):** only `detent init` and `detent run` appear in its commands; `init`'s phases are listed in order, with the sentence that counts them; and the three numbers measured for the `read` default (113, 132 and 124).
+
+Wording elsewhere is free to change.
 
 ## Follow the rules
 
-[AGENTS.md](AGENTS.md) holds the engineering rules, for people and for the agents Detent runs: no `//` comments in TypeScript, no `any` in `src/`, at most 300 lines per `src/` file, every test citing the ticket it closes, and more. `npm run lint` enforces many of them; a reviewer checks the rest.
+[AGENTS.md](AGENTS.md) holds the engineering rules, for people and for the agents Detent runs: no `//` comments in TypeScript, no `any` in `src/`, at most 300 lines per `src/` file, a `TODO` or a skipped test naming its issue (`#123`), and more. `npm run lint` enforces many of them; a reviewer checks the rest.
 
 ## Send a pull request
 
-1. Fork the repository and create a branch from the default branch.
-2. Make one change per pull request, with a test when you change behaviour.
-3. Run the checks above.
-4. Open the pull request, say what it changes and why, and link the issue (`Closes #12`).
+1. Make one change per pull request, on a branch of your fork (see *Set up*), with a test when you change behaviour.
+2. Run the checks above.
+3. Push your branch (`git push -u origin fix-the-thing`) and open the pull request. Say what it changes and why, and link the issue (`Closes #12`).
+4. If CI fails and you can't tell why, say so in the pull request: we'll help.
 5. Give it a title in the [Conventional Commits](https://www.conventionalcommits.org) form, `type: what it does`:
 
    | Title | When |
