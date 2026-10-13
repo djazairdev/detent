@@ -17,6 +17,36 @@ task gets a fresh session, your project's own tests decide whether it worked,
 and a second session reviews the work before it counts. When Detent can't fix
 something itself, it stops and hands it to you.
 
+```mermaid
+flowchart TD
+    P["your plans"] --> I["/detent:init<br>turns them into small tasks"]
+    I --> A{"you approve the plan"}
+    A --> T["next task"]
+    T --> S["a fresh Claude Code session<br>changes only the task's files"]
+    S --> G{"your tests, lint and build"}
+    G -- pass --> V{"a second session reviews"}
+    G -- fail --> F["Detent tries to fix it"]
+    F --> G
+    F -- "can't fix it" --> H["you decide"]
+    H --> T
+    V -- "changes needed" --> S
+    V -- approved --> K{"checked once more"}
+    K --> D["done, on Detent's own branch"]
+    D --> T
+
+    classDef you fill:#fbbf24,stroke:#b45309,color:#1f2937
+    classDef machine fill:#6366f1,stroke:#4338ca,color:#ffffff
+    classDef verify fill:#34d399,stroke:#047857,color:#1f2937
+    classDef fix fill:#f87171,stroke:#b91c1c,color:#1f2937
+    class P,A,H you
+    class I,T,S,D machine
+    class G,V,K verify
+    class F fix
+```
+
+Amber is you; indigo is Detent; green is checking; red is fixing. The full
+loop, with every case, is in [docs/golden-path.md](docs/golden-path.md).
+
 Every step is decided by a *referee*: plain code, not an AI. That's what makes
 it different from letting an agent run on its own:
 
