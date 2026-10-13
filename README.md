@@ -110,7 +110,7 @@ a config an earlier Detent wrote are in
 
 ## Plumbing
 
-Documented, scriptable, and never required on the golden path:
+Documented, scriptable, and never required on the golden path ([docs/golden-path.md](docs/golden-path.md)):
 `detent status`, `detent report`, `detent doctor`, `detent approve <id>`,
 `detent requeue <id>`, `detent unclaim <id>`, `detent amend <AM-id>`, `detent verify sync`,
 `detent verify lifecycle`.
