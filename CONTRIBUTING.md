@@ -1,6 +1,6 @@
 # Contributing
 
-<!-- djazairdev-template: 1.5.3 -->
+<!-- djazairdev-template: 1.6.0 -->
 
 Thanks for helping. Newcomers are welcome: you don't need to be an expert, and no question is too small.
 
