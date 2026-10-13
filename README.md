@@ -27,7 +27,7 @@ whichever way the plan was written.
   inside its ticket's declared surface; allow-rules cannot shadow it.
 
 Detent is held to the standard it enforces: every change to Detent lands
-through a pull request that must pass its seven checks on Node 22 and 24, and
+through a pull request that must pass its six checks on Node 22 and 24, and
 every release walks [the release checklist](docs/release-checklist.md).
 
 Detent is built and maintained in Algeria, as part of [djazairdev](https://github.com/djazairdev).

@@ -3,7 +3,7 @@
 Source of truth: `detent-prd-v3.md` (3.0-draft.1). This plan decomposes the MP0…MP4 milestone series of §13 into tickets `T-1##` (distinct from the v2 line's `T-0##`). It applies **PRDR-065** and depends on nothing outside the v3 PRD.
 
 ## §0. Working agreements (carry from v2, unchanged)
-- **No-deviation (N-6).** A design change files a `tickets/prd-review/` PRDR **first**, the PRD amends, then this plan and code follow. PRDR evidence blocks quote the PRD verbatim and are never retro-edited.
+- **No-deviation (N-6).** A design change is proposed in a GitHub issue **first**, a maintainer amends the PRD, then this plan and code follow. Until 13 October 2026 it was filed as a PRDR review record; those records are in [`archive/prd-review/`](../archive/prd-review/) and are never retro-edited.
 - **Trailers.** Commits carry `Detent-Ticket: T-1##`.
 - **Tests-before-code, where an oracle exists.** The v2 kernel *is* the referee, and its **553 passing tests are the referee's conformance floor** — MP0 may not regress one. v3's *new* surfaces (the R-* MCP boundary, the plugin, the model-driven loop) have **no oracle**; they are spec-first, tests derived from the PRD's ACs.
 - **Live-key discipline (R-10).** Any ticket that spends against the user's `ANTHROPIC_API_KEY` (marked ⚡ below) is gated on explicit per-run consent and a spend cap. Never run unprompted.

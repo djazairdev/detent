@@ -8,7 +8,8 @@ Thanks for helping. Newcomers are welcome: you don't need to be an expert, and n
 
 - Issues labelled [good first issue](https://github.com/djazairdev/detent/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) are small and well described. [help wanted](https://github.com/djazairdev/detent/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22) issues need more context but are ready for anyone.
 - Comment on the issue to say you're working on it, so no one else starts the same thing. If you stop, say so.
-- For anything bigger than a small fix, open an issue first and agree on the approach.
+- Found a bug, or have an idea? [Open an issue](https://github.com/djazairdev/detent/issues/new/choose). That's all it takes: there's no separate form or record to file, and no approval step before you start on an issue labelled for help.
+- For anything bigger than a small fix, say in the issue how you'd do it, so we agree on the approach before you spend time on it.
 
 ## Set up
 
@@ -27,6 +28,7 @@ The same commands CI runs on every pull request, on Node 22 and 24:
 ```bash
 npm run parity:check    # the parity report and the critical path are up to date
 npm run prompts:check   # prompts/manifest.json pins the hash of every role prompt
+npm run rules:check     # the AGENTS.md rules lint doesn't reach
 npm run lint
 npm run typecheck
 npm test
@@ -36,7 +38,7 @@ If `parity:check` or `prompts:check` fails, run `npm run parity` or `npm run pro
 
 ## Follow the rules
 
-[AGENTS.md](AGENTS.md) holds the engineering rules, for people and for the agents Detent runs: no `//` comments in TypeScript, no `any` in `src/`, at most 300 lines per `src/` file, every test citing the ticket it closes, and more. `npm run lint` enforces many of them; a reviewer checks the rest.
+[AGENTS.md](AGENTS.md) holds the engineering rules, for people and for the agents Detent runs: no `//` comments in TypeScript, no `any` in `src/`, at most 300 lines per `src/` file, a `TODO` or a skipped test naming its issue (`#123`), and more. `npm run lint` enforces many of them; a reviewer checks the rest.
 
 ## Send a pull request
 

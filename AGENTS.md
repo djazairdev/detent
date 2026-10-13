@@ -7,7 +7,7 @@ session Detent launches, the agents Detent itself runs during a self-build
 sessions were prompted with `(no rules file)` while this line said otherwise.
 
 Rules marked **[lint]** are enforced by `npm run lint`. Seven more are enforced
-by `npm run rules:check` — grab-bag filenames, TODO markers without a ticket,
+by `npm run rules:check` — grab-bag filenames, TODO markers without an issue number,
 `console.*` in `src/`, empty catches with no stated why, `.only`/`.skip`,
 `node:` prefixes, and `.js` specifiers. The rest need a reader, and the checker
 names them rather than implying a green run means full compliance. When a rule
@@ -37,11 +37,12 @@ file gets fixed.
   sight; the fix for unclear code is clearer code.
 - Comments state what the code cannot: the constraint, the invariant, the
   deliberate deviation — and cite the requirement that demands it
-  (`C-9`, `ARCH-1`, `D-27`, a PRDR). This repo's doc-blocks are load-bearing:
-  the parity map requires test files to cite their closing ticket, and the
-  audit tests quote requirement ids. Keep writing them; keep them at
+  (`C-9`, `ARCH-1`, `D-27`, or the issue, `#123`). This repo's doc-blocks are
+  load-bearing: the parity map requires the ported oracle tests to cite their
+  closing ticket, and the audit tests quote requirement ids. Older comments
+  cite PRDR ids; those records are in `archive/prd-review/`. Keep writing them; keep them at
   block level (`/** … */` above the declaration).
-- `TODO` requires a ticket id or it does not merge.
+- `TODO` names the issue that will close it (`#123`) or it does not merge.
 
 ## Language
 
@@ -87,8 +88,9 @@ file gets fixed.
 
 ## Tests
 
-- Tests before code where an oracle exists; every test file cites the ticket
-  it closes (the parity map checks this).
+- Tests before code where an oracle exists. A test for a bug names the issue
+  it fixes (`#123`); the ported oracle tests cite their ticket, which the parity
+  map checks.
 - One behavior per test; fixtures over mocks where the real thing is cheap
   (real git repos, real gate scripts).
-- `.only`/`.skip` never merge; a skip that must stay carries its ticket id.
+- `.only`/`.skip` never merge; a skip that must stay names its issue (`#123`).

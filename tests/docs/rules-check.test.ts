@@ -24,12 +24,15 @@ describe("PRDR-176 the AGENTS.md rules gate catches what it claims", () => {
     expect(rulesOf("src/kernel/escrow.ts", "export const x = 1;\n")).toEqual([]);
   });
 
-  it("flags a TODO marker with no ticket, and accepts one that cites its ticket", () => {
-    expect(rulesOf("src/a.ts", "/* TODO: split this */\n")).toContain("comments/todo-needs-ticket");
-    expect(rulesOf("src/a.ts", "/* TODO: split this (PRDR-176) */\n")).toEqual([]);
+  it("flags a TODO marker with no issue, and accepts one that names its issue", () => {
+    expect(rulesOf("src/a.ts", "/* TODO: split this */\n")).toContain("comments/todo-needs-issue");
+    expect(rulesOf("src/a.ts", "/* TODO: split this (#29) */\n")).toEqual([]);
+    expect(rulesOf("src/a.ts", "/* TODO(#29): split this */\n")).toEqual([]);
+    expect(rulesOf("src/a.ts", "/* TODO: split this, https://github.com/djazairdev/detent/issues/29 */\n")).toEqual([]);
+    /* An id from before issues replaced the review records still counts. */
     expect(rulesOf("src/a.ts", "/* TODO(PRDR-176): split this */\n")).toEqual([]);
     /* Prose about the word is not a marker — this rule flagged its own docs twice. */
-    expect(rulesOf("src/a.ts", "/* a TODO carries a ticket id */\n")).toEqual([]);
+    expect(rulesOf("src/a.ts", "/* a TODO carries an issue number */\n")).toEqual([]);
   });
 
   it("flags console.* in src/ and not in tests/", () => {
@@ -39,10 +42,11 @@ describe("PRDR-176 the AGENTS.md rules gate catches what it claims", () => {
     expect(rulesOf("src/a.ts", "deps.print(x);\n")).toEqual([]);
   });
 
-  it("flags .only always and .skip only when it cites no ticket", () => {
+  it("flags .only always and .skip only when it names no issue", () => {
     expect(rulesOf("tests/a.test.ts", 'it.only("x", () => {});\n')).toContain("tests/no-only");
     expect(rulesOf("tests/a.test.ts", 'describe.only("x", () => {});\n')).toContain("tests/no-only");
-    expect(rulesOf("tests/a.test.ts", 'it.skip("x", () => {});\n')).toContain("tests/skip-needs-ticket");
+    expect(rulesOf("tests/a.test.ts", 'it.skip("x", () => {});\n')).toContain("tests/skip-needs-issue");
+    expect(rulesOf("tests/a.test.ts", 'it.skip("x — restored by #35", () => {});\n')).toEqual([]);
     expect(rulesOf("tests/a.test.ts", 'it.skip("x — restored by PRDR-176", () => {});\n')).toEqual([]);
     expect(rulesOf("tests/a.test.ts", 'it("x", () => {});\n')).toEqual([]);
   });

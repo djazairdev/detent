@@ -23,11 +23,10 @@ says the pull request "remained the same". Bring it up to date first with
 `gh pr update-branch <number> --rebase`; that push starts its checks.
 
 1. **Gates green on both Node lines.** `npm run parity:check`,
-   `npm run prompts:check`, `npm run rules:check`, `npm run tickets:check`,
-   `npm run lint`, `npm run typecheck`, `npm test` — locally and in CI
-   (node 22 + 24). The two checkers joined the list at PRDR-247: both had
-   existed for months and ran in no workflow, so the only thing enforcing them
-   was someone remembering.
+   `npm run prompts:check`, `npm run rules:check`, `npm run lint`,
+   `npm run typecheck`, `npm test` — locally and in CI (node 22 + 24).
+   `rules:check` joined the list at PRDR-247: it had existed for months and
+   ran in no workflow, so the only thing enforcing it was someone remembering.
 2. **Porcelain freeze re-affirmed (C-14′).** Exactly two commands and the
    five closed decisions, on both surfaces — CLI and plugin. The golden-path
    docs tests are the proof; a failure here is a major-version decision that

@@ -17,9 +17,7 @@ import { definitionText, definitions } from "./prd-marks.js";
  *
  * Where the code already has what the PRD states — a role's default routing,
  * a ceiling's default — the two are compared, so the PRD cannot drift from
- * the code once the tickets that build the new roles and the new ceiling land.
- * Those tickets are not named here: a ticket id cited under `tests/` reads to
- * `tickets:check` as work that has landed.
+ * the code once the work that builds the new roles and the new ceiling lands.
  */
 const PRD = readFileSync(new URL("../../detent-prd-v3.md", import.meta.url), "utf8");
 const CHECKLIST = readFileSync(new URL("../../docs/release-checklist.md", import.meta.url), "utf8");

@@ -134,7 +134,8 @@ function mask(source: string, blankComments: boolean): string {
   return out.join("");
 }
 
-const TICKET_ID = /(PRDR-\d+|T-\d+|t-[\w-]+|[A-Z]{1,4}-\d+)/;
+/** A GitHub issue (`#123`, or its URL), or an id from before issues replaced the review records (`archive/`). */
+const ISSUE_REF = /(#\d+|\/issues\/\d+|PRDR-\d+|T-\d+|t-[\w-]+|[A-Z]{1,4}-\d+)/;
 
 /** Every rule this gate can decide, applied to one file. */
 export function violationsIn(rel: string, source: string): RuleViolation[] {
@@ -177,7 +178,7 @@ export function violationsIn(rel: string, source: string): RuleViolation[] {
     const line = index + 1;
 
     /**
-     * AGENTS.md §Comments: a TODO without a ticket id does not merge.
+     * AGENTS.md §Comments: a TODO without an issue number does not merge.
      *
      * A MARKER, not the word: the marker form is the word followed by a colon,
      * optionally with a parenthesised id between them. Prose that mentions the
@@ -187,8 +188,8 @@ export function violationsIn(rel: string, source: string): RuleViolation[] {
      * bare marker written without the colon is the harmless direction; a
      * checker that fires on prose trains people to ignore it.
      */
-    if (/\bTODO\s*(?:\([^)]*\))?\s*:/.test(text) && !TICKET_ID.test(text)) {
-      add(line, "comments/todo-needs-ticket", "a TODO carries the id of the ticket that will close it");
+    if (/\bTODO\s*(?:\([^)]*\))?\s*:/.test(text) && !ISSUE_REF.test(text)) {
+      add(line, "comments/todo-needs-issue", "a TODO names the issue that will close it, such as #123");
     }
 
     /** AGENTS.md §Errors: no `console.*` in `src/` — text flows through the caller's seams. */
@@ -196,13 +197,13 @@ export function violationsIn(rel: string, source: string): RuleViolation[] {
       add(line, "errors/no-console", "user-facing text flows through the caller's print/note/announce seam");
     }
 
-    /** AGENTS.md §Tests: `.only`/`.skip` never merge; a kept skip carries its ticket id. */
+    /** AGENTS.md §Tests: `.only`/`.skip` never merge; a kept skip names its issue. */
     if (isTest && /\b(?:it|test|describe)\s*\.\s*only\s*[.(]/.test(text)) {
       add(line, "tests/no-only", "`.only` silently shrinks the suite to one case");
     }
     const raw = rawLines[index] ?? "";
-    if (isTest && /\b(?:it|test|describe)\s*\.\s*skip\s*[.(]/.test(text) && !TICKET_ID.test(raw)) {
-      add(line, "tests/skip-needs-ticket", "a skip that must stay names the ticket that will restore it");
+    if (isTest && /\b(?:it|test|describe)\s*\.\s*skip\s*[.(]/.test(text) && !ISSUE_REF.test(raw)) {
+      add(line, "tests/skip-needs-issue", "a skip that must stay names the issue that will restore it, such as #123");
     }
 
     /* A real import or export statement, not a string that quotes one. */
