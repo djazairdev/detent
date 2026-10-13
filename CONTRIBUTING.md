@@ -13,13 +13,23 @@ Thanks for helping. Newcomers are welcome: you don't need to be an expert, and n
 
 ## Set up
 
-Detent is a Claude Code plugin written in TypeScript. You need Node.js 22 or later.
+Detent is a Claude Code plugin written in TypeScript. You need:
+
+- Node.js 22 or later;
+- git, which the tests use to make scratch repositories.
+
+You don't need a Claude account or an API key to develop Detent: the tests never call a model. You need the [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) and an account only to try your change on a real project.
+
+[Fork the repository](https://github.com/djazairdev/detent/fork), then clone your fork and make a branch:
 
 ```bash
-git clone https://github.com/djazairdev/detent
+git clone https://github.com/<your-username>/detent
 cd detent
 npm ci
+git switch -c fix-the-thing
 ```
+
+New to the code? [docs/architecture.md](docs/architecture.md) says what each folder of `src/` does, and [docs/README.md](docs/README.md) says which documents are current.
 
 ## Run the checks
 
@@ -34,7 +44,26 @@ npm run typecheck
 npm test
 ```
 
-If `parity:check` or `prompts:check` fails, run `npm run parity` or `npm run prompts` to regenerate the file, and commit it with your change.
+Some files are generated. If a check says one is stale, regenerate it and commit it with your change:
+
+| The check says | Run |
+|---|---|
+| `parity:check` fails | `npm run parity` |
+| `prompts:check` fails | `npm run prompts` (you changed a file in `prompts/`) |
+| `agents/<role>.md is stale` or the hook bundle is stale | `npm run plugin` (you changed a prompt, a role's tools or `src/plugin/`) |
+
+### Parts of the README that tests check
+
+Some README passages state what the code does, and tests check that they still match. If you change one, change the code or the test with it, or CI fails:
+
+- **The golden path:** only `detent init` and `detent run` appear in its commands; the list of `init`'s phases, and the sentence that counts them; and the measured sentence about the `read` default (113 of 132).
+- **Plumbing:** the commands are documented there, off the golden path.
+- **Models:** each row of the table names a role, its model and its level, as the code routes them.
+- **What Detent will never do:** the four refusals.
+- **Exit codes:** the four rows of the table.
+- **The opening:** the four promises, and that every change lands through a pull request and every release walks the release checklist.
+
+The rest of the README, such as *Install*, *Make your first contribution* and *Feedback*, has no such test.
 
 ## Follow the rules
 
@@ -42,10 +71,10 @@ If `parity:check` or `prompts:check` fails, run `npm run parity` or `npm run pro
 
 ## Send a pull request
 
-1. Fork the repository and create a branch from the default branch.
-2. Make one change per pull request, with a test when you change behaviour.
-3. Run the checks above.
-4. Open the pull request, say what it changes and why, and link the issue (`Closes #12`).
+1. Make one change per pull request, on a branch of your fork (see *Set up*), with a test when you change behaviour.
+2. Run the checks above.
+3. Push your branch (`git push -u origin fix-the-thing`) and open the pull request. Say what it changes and why, and link the issue (`Closes #12`).
+4. If CI fails and you can't tell why, say so in the pull request: we'll help.
 5. Give it a title in the [Conventional Commits](https://www.conventionalcommits.org) form, `type: what it does`:
 
    | Title | When |
