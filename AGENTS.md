@@ -41,7 +41,8 @@ pick says where to start, and [docs/architecture.md](docs/architecture.md) maps 
   (`C-9`, `ARCH-1`, `D-27`, or the issue, `#123`). This repo's doc-blocks are
   load-bearing: the parity map requires the ported oracle tests to cite their
   closing ticket, and the audit tests quote requirement ids. Older comments
-  cite PRDR ids; those records are in `archive/prd-review/`. Keep writing them; keep them at
+  cite PRDR ids; those records are in git history
+  ([`tickets/prd-review/`](https://github.com/djazairdev/detent/tree/f0fe15c3163ed22c52ba7237a82fd8f03ab9d6f0/tickets/prd-review)). Keep writing them; keep them at
   block level (`/** … */` above the declaration).
 - `TODO` names the issue that will close it (`#123`) or it does not merge.
 

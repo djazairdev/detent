@@ -134,7 +134,7 @@ function mask(source: string, blankComments: boolean): string {
   return out.join("");
 }
 
-/** A GitHub issue (`#123`, or its URL), or an id from before issues replaced the review records (`archive/`). */
+/** A GitHub issue (`#123`, or its URL), or an id from before issues replaced the review records, now in git history. */
 const ISSUE_REF = /(#\d+|\/issues\/\d+|PRDR-\d+|T-\d+|t-[\w-]+|[A-Z]{1,4}-\d+)/;
 
 /** Every rule this gate can decide, applied to one file. */

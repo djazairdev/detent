@@ -20,8 +20,5 @@ Kept for the reasoning behind decisions, not current:
 
 - [implementation-plan.md](implementation-plan.md): the version 2 plan. `npm run parity` still reads it.
 - [detent-prd-v2.md](../detent-prd-v2.md): the version 2 PRD, which version 3 builds on.
-- [plan-specification-phase.md](history/plan-specification-phase.md), [plan-planning-redesign.md](history/plan-planning-redesign.md), [plan-cost-strategy.md](history/plan-cost-strategy.md): design plans, since recorded in the PRD.
-- [plan-contracts-and-symbols.md](history/plan-contracts-and-symbols.md): a proposal, not yet built.
-- [planning-phase-audit-2026-09-26.md](history/planning-phase-audit-2026-09-26.md): an audit of the planning phase.
-- [research/](research/): background research.
-- [../archive/prd-review/](../archive/prd-review/): the review records from before October 2026.
+
+Older design plans, research and the review records that comments cite as `PRDR-123` were removed on 13 October 2026. They are in git history: [`docs/`](https://github.com/djazairdev/detent/tree/f0fe15c3163ed22c52ba7237a82fd8f03ab9d6f0/docs) and [`tickets/prd-review/`](https://github.com/djazairdev/detent/tree/f0fe15c3163ed22c52ba7237a82fd8f03ab9d6f0/tickets/prd-review) as they stood that day.
