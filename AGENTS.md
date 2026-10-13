@@ -1,10 +1,10 @@
 # Rules
 
-Engineering standards for this repository. Two audiences, one file: agents and
-humans editing this code — and, because `readRules()` feeds this file to every
-session Detent launches, the agents Detent itself runs during a self-build
-(N-7). That claim was false for the planning pipeline until PRDR-176: init
-sessions were prompted with `(no rules file)` while this line said otherwise.
+The engineering rules for this repository, for people and for coding agents
+working on it. `readRules()` also gives this file to every session Detent
+launches when it runs on its own code. New here? Read
+[CONTRIBUTING.md](CONTRIBUTING.md) first; it says how to start, and
+[docs/architecture.md](docs/architecture.md) says where things are.
 
 Rules marked **[lint]** are enforced by `npm run lint`. Seven more are enforced
 by `npm run rules:check` — grab-bag filenames, TODO markers without an issue number,
