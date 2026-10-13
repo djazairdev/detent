@@ -58,42 +58,23 @@ Two commands. That is the whole public workflow.
 detent init
 ```
 
-`init` runs eleven phases, in order. On a terminal it asks you DECIDE's questions as it goes, and otherwise it stops between them only where VALIDATE cannot go on without you:
+`init` runs eleven phases, in order. On a terminal it asks you DECIDE's questions as it goes; otherwise it stops only where it can't go on without you, and at the end for your approval. Each phase in a sentence:
 
-- **INIT_FS**: checks you're at a git root and scaffolds `.detent/`.
-- **DISCOVER**: finds your planning documents and candidate verification commands.
-- **AUDIT**: reads the documents before anything plans from them. It finds passages that contradict each other, gaps a plan would need filled, and, in an existing project, what the documents say is built that the code does not do. It sorts the external claims they rely on, such as a library's behaviour at the version you pin, and checks each one a decision rests on and a primary source could settle against that source, each in a session of its own. A claim a decision rests on but no source could settle goes to DECIDE, and a claim nothing rests on is recorded, not checked. It prints what it found, and DECIDE settles it.
-- **DECIDE**: settles what AUDIT left open before anything plans from it. A decision counted in money or contracts is asked, in screens of at most four, the recommended answer first and each option with what choosing it means; everything else is settled as a default you can veto. Both go into `docs/founder-decisions.md`, the decision log, which every later phase reads, and a question the log already answers is not asked again. Off a terminal it takes each recommended answer and says so. In a new project it also decides the stack.
-- **WRITE**: rewrites the documents into the pack, a fixed layout under `docs/` in which every requirement has an id, a milestone and MUST or SHOULD, every acceptance criterion states Given, When and Then, and every decision and default the pack relies on is cited by id. It moves each original it rewrote to `archive/` and deletes nothing; a README stays where it is. The pack checker checks what it wrote, its session is relaunched once on a blocking finding, and the result, red or green, goes into `docs/conformance.json`, which says the pack is not validated yet.
-- **VALIDATE**: validates the pack before anything plans from it. A red pack checker is fixed first. Then each round runs one reviewer per area of the pack, the areas your index names, and each finding comes with its severity, blocker, major or minor, its `file:line`, a quote and the exact fix; a writer applies them, and the next round checks those fixes and what they broke. A round with no blocker and no major ends it, its minor findings fixed. `spec_validation_rounds` (default 8) is the ceiling: there, the majors left go to PRESENT as risks and planning goes on, and a blocker stops `init` for you to settle, after which `detent init` carries on where it stopped. A checker it cannot make green stops `init` too. Every round's counts and what it left open go into `docs/conformance.json`. An edit to a validated pack is re-validated for the edit and whatever cites it. The phases after it plan from the pack.
-- **DETERMINE_VERIFICATION**: probes candidate test/lint/build commands and binds the ones that actually run, for the root and for every package in the repository (a directory with a manifest of its own, such as `package.json`, `go.mod`, `pyproject.toml` or `Cargo.toml`), each run in its package's directory. A ticket's gates are those of the packages its surface touches, and a plan with a ticket writing where no package has a gate cannot be approved. In a new project there is nothing to run yet, so it proposes the gate commands the decision log records for each package, and the bootstrap ticket proves them.
-- **SLICE**: cuts the whole product into ordered increments — walking skeleton first — and places a production baseline (secrets, auth, backups, health checks, CI gates, …) in the slice where each item belongs, whether or not your documents asked for it. On a pack it groups the pack's requirement ids by milestone and module, refuses a cut that loses, repeats or invents one or delivers a milestone out of order, and keeps its cut from one run to the next: an edited requirement re-plans only its own slice, and a new one is placed without moving any other.
-- **PLAN**: plans every slice in turn into tickets with acceptance criteria, surfaces, and dependencies. Code checks every draft, and after every slice the plan so far: each requirement, baseline item and acceptance criterion reaches a ticket, each name a ticket uses has exactly one provider in its own slice or an earlier one, no ticket waits on a later milestone's work, every path a ticket writes has a gate, and no dependency cycle remains. A draft that fails is redrafted once with its failures, and no model reads the whole plan. A draft that passes is read once by a reviewer of its own role, for what code cannot check: a ticket too big for one session, a slice that builds infrastructure before anything runs end to end, a dependency no contract names, and tickets that contradict each other or the specification. It grades each finding blocker, major or minor, with the fix. A blocker or major buys the slice one revision, which code checks and no reviewer reads again; a minor goes to the sessions that run its ticket. On a pack, each slice is drafted from its requirements as the pack checker parses them, with their acceptance criteria and what they cite, and a ticket copies each criterion it delivers word for word. Planning asks nothing: what the pack contradicts or leaves unsettled is reported as a spec defect, quoted from the pack, and a quote the pack does not hold is refused.
-- **PREPARE_AGENTS**: assigns roles and, where configured, models per ticket.
-- **PRESENT**: shows you the slices, the tickets and the milestone of each, the decision log (every decision, and every default, marked vetoable), every risk VALIDATE left open, every blocker and major the plan's review found, with its fix, since no reviewer read the revision it bought, any slice no reviewer read, every spec defect planning found, and what each specification phase and planning cost, which is reported and never capped. It names the Detent build that made the plan and the pack it was planned from; a plan more than one build made, or with a part written before builds were recorded, is approved only once you accept that, with y at a `[y/N]` on a terminal or `--accept-mixed-builds` beside `--approve`, and `detent init --replan` makes it again with one build. Then it stops for your approval. The plan is printed once, and `detent run` shows that same text when approval was deferred. To veto a default, edit its row in the log and run `detent init` again. A spec defect holds approval, on a terminal or not, until you amend the pack where it quotes it and run `detent init` again; the slice that reported it is then planned again. So does a check that still fails after its redraft: PRESENT checks the tickets as they stand, so amend the pack, or edit the tickets under `.detent/plan/`, and run `detent init` again.
+- **INIT_FS**: checks you're at the root of a git repository and creates the `.detent/` folder.
+- **DISCOVER**: finds your planning documents, and the commands that test, lint and build your project.
+- **AUDIT**: reads your documents and lists what contradicts itself and what's missing. It checks the claims your decisions rely on, such as how a library behaves at the version you pin, against their sources.
+- **DECIDE**: settles what AUDIT left open. It asks you what only you can decide, such as money or contracts, proposes a default for the rest, and records everything in `docs/founder-decisions.md`.
+- **WRITE**: rewrites your documents into the *pack*, a standard layout in which every requirement has an id and testable acceptance criteria. Your originals move to `archive/`; nothing is deleted.
+- **VALIDATE**: has reviewers check the pack and a writer fix what they find, round after round, until no serious problem is left or 8 rounds have run (the default). A problem it can't fix stops `init` for you.
+- **DETERMINE_VERIFICATION**: runs the candidate commands and keeps the ones that work as the *gates* every change must pass.
+- **SLICE**: cuts the product into *slices*, small increments that each run, starting with the smallest version that works end to end.
+- **PLAN**: turns each slice into *tickets*, small tasks that each name their acceptance criteria, the files they may change and what they wait on. Code checks every ticket, and a reviewer reads each slice's plan.
+- **PREPARE_AGENTS**: chooses the role, and the model, for each ticket's sessions.
+- **PRESENT**: shows you the plan, the decisions and defaults, the risks left open and what planning cost, then waits for your approval.
 
-Before each costly step, AUDIT's claim checks, each VALIDATE round's reviews and its writer's
-batches, and PLAN's slices, `init` says how many it will run and what they should cost and how
-long they should take: the units times a unit's figure, run as many at once as the step runs them.
-The figure is the median of this project's own sessions of the kind once there are five, and
-otherwise Detent's measured figure, which the note names with the run that measured it; a kind
-nothing has measured yet is said to have no estimate. An estimate informs, and nothing waits for it.
+[docs/how-it-works.md](docs/how-it-works.md) has each phase in full, with the cost estimates `init` prints and the settings below.
 
-AUDIT's claim checks and a VALIDATE round's reviews run four sessions at once. To change that, set
-`init_sessions_at_once` under `budgets` in `.detent/config.json` to a whole number from 1 to 16.
-More at once finish sooner and use up your account's usage window faster; fewer take longer and use
-it more slowly. The number changes nothing a session is given, nor its model or effort. When a
-usage limit stops a session, `init` waits for the reset the limit names and resumes that session
-where it stopped, so no finished work is lost. VALIDATE's writer still runs its batches one at a
-time, since they edit the same files.
-
-Every VALIDATE reviewer reads the pack's foundations before its own area, and pays to cache them
-in its own session. With `review_foundations` set to `given` in `.detent/config.json`, a round
-hands every reviewer the foundations as the same system prompt instead. The round's first
-reviewers cache it, and the rest read it from the cache, so a review costs about 40% less. The
-default stays `read`: on Detent's review set, reviewers handed the foundations found every
-blocker but only 113 of its 132 majors, where reviewers reading them found 124. Switching a
-stopped `init` to `given` reviews again the areas its round had already kept.
+Two settings change how `init` runs, in `.detent/config.json`. `init_sessions_at_once`, under `budgets`, is how many of AUDIT's checks and VALIDATE's reviews run at once (4 by default, 1 to 16). `review_foundations` set to `given` makes each review about 40% cheaper, but it finds less. The default stays `read`: on Detent's review set, reviewers handed the foundations found every blocker but only 113 of its 132 majors, where reviewers reading them found 124.
 
 ```bash
 detent run
@@ -125,11 +106,17 @@ flowchart TD
     class L ladder
 ```
 
-Amber is you; indigo is the machine's moves; green is verification; red is
-the fix ladder. Every arrow is a referee-admitted transition, journaled to
-`transitions.jsonl`. Budgets are evaluated at session launch and a breached
-ceiling routes to a human, never to a retry; a risk-labelled ticket takes
-one extra stop at your approval before DONE.
+`run` takes the next ticket and starts a fresh Claude Code session that may
+change only the files the ticket names. Then it runs your project's own
+tests, lint and build. When they pass, a separate session reviews the change.
+When they fail, Detent tries to fix it, first directly, then after researching
+the failure, and hands the ticket to you if nothing works.
+
+Amber is you; indigo is Detent; green is checking; red is fixing. The
+*referee*, plain code and not a model, decides every move, and records each one
+in `transitions.jsonl`. A limit you set, on attempts or on spending, hands
+the ticket to you and is never retried, and a ticket labelled risky waits for your approval before it's
+done.
 
 ## Models
 
@@ -144,33 +131,11 @@ routing to `.detent/config.json`:
 
 The roles that judge, plan and specify run on Opus; the roles that write code
 run on Sonnet. Edit `model_routing` and `effort_routing` in
-`.detent/config.json` to change either. A config written by an earlier Detent
-keeps its own routing: `detent doctor`, and `init` and `run` before their first
-session, name each role still on a model a newer default supersedes, with the
-line that moves it. Sessions run on the Claude Code the Agent SDK bundles, not
-the `claude` on your PATH, so `doctor` also fails on a routed model that
-runtime cannot serve.
+`.detent/config.json` to change either.
 
-A role that runs several tasks can have one of them routed apart under a
-`role/task` key of `effort_routing`, such as `audit/verify_claims` for AUDIT's
-claim checks; its other tasks keep the role's level. A first `init` names the
-keys. The defaults route a task below its role's level only after it meets the
-bar on Detent's evaluation sets, and one has: a VALIDATE reviewer's first-round
-review (`spec_review/review`) runs at `high`, which found every blocker of the
-review set, and 124 of its 132 majors where `max` found 126, for less than half
-of what `max` spent. A verification stays at `max`. A config written by an
-earlier Detent keeps its first-round reviews at `max` until
-`"spec_review/review": "high"` is added to its `effort_routing`. AUDIT's claim
-checks stay at `max` too, since no cheaper setup found every wrong claim, and
-nor did `max` itself on a second run.
-
-In `run`, a ticket's risk and Detent's own checks raise these levels, and never
-lower them. A ticket the plan labels risky, or whose surface meets a glob of the
-config's `risk` list, runs its implement, fix and review sessions at `max`. Each
-attempt that fails a gate, has its premise falsified, or is sent back by its
-review runs the ticket's next implement or fix session one level higher, up to
-`max`, and says so on the ticket. A ticket whose surface meets one that stopped
-for you or was falsified earlier in the run starts one level higher.
+Per-task routing, how a ticket's risk raises these levels, and what happens to
+a config an earlier Detent wrote are in
+[docs/how-it-works.md](docs/how-it-works.md#models-in-detail).
 
 ## What Detent will never do
 
