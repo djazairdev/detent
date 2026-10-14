@@ -19,7 +19,7 @@ something itself, it stops and hands it to you.
 
 ```mermaid
 flowchart TD
-    P["your plans"] --> I["/detent:init<br>turns them into small tasks"]
+    P["your plans"] --> I["/detent:init<br>turns them into small tasks<br>and asks what's yours to decide"]
     I --> A{"you approve the plan"}
     A --> R["/detent:run<br>works through the tasks"]
     R --> T["next task"]
@@ -53,8 +53,10 @@ it different from letting an agent run on its own:
 
 - **You can see everything it did.** Every step is written to a log file you
   can read, not buried in a chat.
-- **It can't overspend.** You set limits on attempts and money. When one is
-  reached, Detent stops and asks you instead of trying again.
+- **It can't retry forever.** Each task has limits on fix attempts and time.
+  When one is reached, Detent stops that task and asks you instead of trying
+  again. Spending is logged as it happens, and a spending limit warns you
+  rather than stopping the run.
 - **Your tests are the judge.** It runs your project's own test, lint and build
   commands, and stops if they change during a run.
 - **It stays in its lane.** Each session can only change the files its task
@@ -68,9 +70,9 @@ every release walks [the release checklist](docs/release-checklist.md).
 
 You need [Claude Code](https://docs.claude.com/en/docs/claude-code),
 Node.js 22 or later, and git. Sessions run on your Claude login, or on an API
-key in `ANTHROPIC_API_KEY`, and every one spends real usage: on a real project,
-a single review session cost between $3 and $9, and `init` runs many. It
-estimates the cost of each costly step before it starts.
+key in `ANTHROPIC_API_KEY`, and every one spends real usage: on one real
+project, a review session cost about $8, and up to $15, and `init` runs many.
+It estimates the cost of each costly step before it starts.
 
 1. Install the plugin:
 
@@ -86,8 +88,13 @@ estimates the cost of each costly step before it starts.
    /detent:init
    ```
 
-   Detent checks your documents, settles what they leave open with defaults
-   you can veto, and shows you the plan for approval.
+   Detent checks your documents and settles what a source or reasoning can
+   settle, with defaults you can veto. Each decision that is yours to make
+   becomes a question in `.detent/questions.md`, and Detent keeps working
+   while it waits for your answer. Once every question is answered, it shows
+   you the plan for approval. You can stop it at any time: run `/detent:init`
+   again (or `detent init` from a terminal) and it picks up where it stopped,
+   reusing the work it had finished and applying the answers you gave.
 
 3. Run the approved plan:
 
