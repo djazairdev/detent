@@ -4159,7 +4159,9 @@ the rules it amends describe, and each of those rules points here.
   - **Answers flow in.** The founder answers in the questions file at any time. Code reads it at
     each phase boundary and before each VALIDATE round's writer, and writes each answer to the
     decision log as a `D-n` between writer batches, so no batch's restore or rollback of the log
-    undoes it (C-2¹⁴). The next writer applies the answer where its `Q-n` is cited, and the round
+    undoes it (C-2¹⁴). The next writer applies the answer where its `Q-n` is cited and at the
+    places its question records, those its findings, and any attached to it, were found at, and
+    cites its `D-n` in each of their documents; until it does, the answer is not applied. The round
     after verifies it (C-2²⁹). An answer applied mid-run starts neither a DECIDE nor a WRITE
     session on a pack WRITE has written: both re-run in code, since their keys name the log
     (P9), and write nothing.
@@ -4201,6 +4203,13 @@ the rules it amends describe, and each of those rules points here.
   AWAIT_INFO while a question is open or answered and not yet applied, listing each with its options
   and the slices that wait, and `run`'s exit holds it too; the next `detent init` applies the answers
   and plans the slices that waited (`src/init/plan-waits.ts`).*
+  *Fixed by #45 (2026-10-14): a question VALIDATE's writer asks is cited nowhere in the pack, and
+  PRDR-343 read only `Q-n` cites, so it marked such an answer applied when none was: on Hearth,
+  four answers reached the writer as none. An answer now applies where its `Q-n` is cited and at
+  the places its question records, in the documents the writer may change; it stays unapplied, and
+  so unsettled for planning, until each of those documents cites its `D-n`, and a finding attached
+  to an open question adds its places to the question's (`src/init/validate-answers.ts`,
+  `src/init/validate-asks.ts`).*
 
 - **C-2²⁹ (PRDR-338, 2026-10-11).** VALIDATE asks what its rounds cannot settle. C-2¹⁴'s writer
   patched every finding, and the loop asked only at its ceiling (specification decision 13). On
@@ -4210,7 +4219,7 @@ the rules it amends describe, and each of those rules points here.
     makes its fix Detent's. A finding whose fix is the founder's is asked as a question, with its
     places, the reviewer's `why` and the options, and is not patched. A finding on a place that
     cites an open `Q-n`, whose fix that answer would settle, is attached to the question and is not
-    patched either. The round's other fixes go ahead, and the loop carries on. Each is recorded
+    patched either; its places become the question's, where its answer applies (#45). The round's other fixes go ahead, and the loop carries on. Each is recorded
     `declined`, with a reason naming its question, so the conformance record keeps its shape (F-3).
   - **The reviewers are the second reader.** They read the questions file with the foundations,
     and flag a default the line makes the founder's, a fix that would take a founder's decision,
@@ -4222,8 +4231,8 @@ the rules it amends describe, and each of those rules points here.
   - **The stop rule counts what Detent can fix.** Asked and attached findings do not count among a
     round's blockers and majors for specification decision 3's stop rule, which this amends. The
     ceiling stays 8, and still governs technical majors.
-  - **An answer is re-validated where it lands.** The round after an answer reviews the places that
-    cite its question and the documents that cite them, not every document that cites any decision,
+  - **An answer is re-validated where it lands.** The round after an answer reviews the places it
+    applies at and the documents that cite them, not every document that cites any decision,
     as a changed log scopes a round under C-2¹⁴.
   *Built by PRDR-342: VALIDATE's writer asks a finding whose fix is the founder's and attaches one an
   open question settles, and declares every default it adds; each reviewer reads the questions and

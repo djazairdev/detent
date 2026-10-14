@@ -155,7 +155,7 @@ describe("PRDR-343: an answer moves no round's scope by itself (C-2²⁹)", () =
     const notes: string[] = [];
     const again = await initThroughValidate(root, { reviewers: r, writer: declines, notes, decideStub: asksLate(), ...ceiling(1) }, citesLate());
     const decision = readQuestions(root).questions[0]?.decision ?? "";
-    expect(notes.join("\n")).toContain("VALIDATE: the founder answered Q-1, which the pack cites; its writer applies the answer before any round (C-3⁶)");
+    expect(notes.join("\n")).toContain("VALIDATE: the founder answered Q-1, which the pack rests on; its writer applies the answer before any round (C-3⁶)");
     expect(declines.inputs[1]).toMatchObject({ findings: [], answers: [expect.objectContaining({ id: "Q-1", decision })] });
     const round2 = r.inputs.filter((i) => i["round"] === 2);
     expect(round2.flatMap((i) => i["documents"] as string[]), "neither the log nor the design note, which cites only X-1").not.toContain(NOTES);
@@ -297,7 +297,7 @@ describe("PRDR-343: the writer is told to apply answers and correct questions", 
   it("says so in the fix task, and tells the reviewer a cited answered question is the writer's", () => {
     const fix = /`fix`:[\s\S]*/u.exec(prompt("spec_write"))?.[0] ?? "";
     expect(fix).toContain("`answers` are the founder's answers given since the pack cited their questions");
-    expect(fix).toContain("apply each answer at each of its places, in the pack's own grammar, and cite its `D-n` there in place of the `Q-n`");
+    expect(fix).toContain("Apply each answer at each of its places, in the pack's own grammar, and cite its `D-n` there, in place of the `Q-n` where the pack cites one");
     expect(fix).toContain("list the question in `corrected`, by its `Q-n`");
     expect(fix).toContain("an answer given to its earlier wording goes back to the founder, never applied");
     const review = prompt("spec_review");

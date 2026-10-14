@@ -210,7 +210,7 @@ export async function validateStage(deps: ValidateStageDeps): Promise<PhaseOutco
 async function answersFirst(deps: ValidateStageDeps): Promise<void> {
   const answers = takeAnswers(deps.root, deps.note);
   if (answers.length === 0) return;
-  deps.note?.(`VALIDATE: the founder answered ${answers.map((a) => a.id).join(", ")}, which the pack cites; its writer applies ${answers.length === 1 ? "the answer" : "the answers"} before any round (C-3⁶)`);
+  deps.note?.(`VALIDATE: the founder answered ${answers.map((a) => a.id).join(", ")}, which the pack rests on; its writer applies ${answers.length === 1 ? "the answer" : "the answers"} before any round (C-3⁶)`);
   await fixFindings(deps, "the founder's answers", [[]], "review");
 }
 

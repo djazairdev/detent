@@ -117,6 +117,14 @@ describe("PRDR-338 the PRD records the founder's line and questions that do not 
     expect(clause("C-2²⁹", "An answer is re-validated where it lands.")).toMatch(/not every document that cites any decision/u);
   });
 
+  it("#45: an answer applies where its question records too, and an attached finding's places become its question's", () => {
+    const answers = clause("C-3⁶", "Answers flow in.");
+    expect(answers).toMatch(/at the places its question records, those its findings, and any attached to it, were found at/u);
+    expect(answers).toMatch(/cites its `D-n` in each of their documents; until it does, the answer is not applied/u);
+    expect(clause("C-2²⁹", "The writer asks or attaches.")).toMatch(/its places become the question's, where its answer applies \(#45\)/u);
+    expect(clause("C-2²⁹", "An answer is re-validated where it lands.")).toMatch(/reviews the places it applies at/u);
+  });
+
   for (const [old, by] of Object.entries(AMENDED)) {
     it(`${old} points forward to ${by}`, () => {
       const text = definitionText(PRD, old).join("\n");

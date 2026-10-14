@@ -1,6 +1,6 @@
 import type { FounderQuestion, QuestionsRecord } from "../schemas/founder-questions.js";
 import type { FixArtifact } from "../schemas/validate.js";
-import { askQuestions, openQuestions, readQuestions } from "./founder-questions.js";
+import { askQuestions, openQuestions, readQuestions, updateQuestions } from "./founder-questions.js";
 import type { Outcome } from "./validate-checks.js";
 
 /**
@@ -103,10 +103,11 @@ function foundBy(f: Asked | undefined): string {
 
 /**
  * Record each asked group as an open question, its places its findings',
- * its reasons each finding's `why` and chain after the writer's, and say what
- * became of every asked or attached finding. A finding attached to a question
- * that is not open waits on nothing, and is left to the account's other
- * outcomes.
+ * its reasons each finding's `why` and chain after the writer's, add each
+ * attached finding's places to its question's, since its answer applies
+ * there too (#45), and say what became of every asked or attached finding. A
+ * finding attached to a question that is not open waits on nothing, and is
+ * left to the account's other outcomes.
  */
 export function askFindings(root: string, artifact: FixArtifact, findings: readonly Asked[]): { readonly asked: FounderQuestion[]; readonly outcome: Map<string, Outcome> } {
   const placesOf = (id: string): { file: string; line: number }[] => {
@@ -130,7 +131,20 @@ export function askFindings(root: string, artifact: FixArtifact, findings: reado
   artifact.asked.forEach((g, n) => {
     for (const id of g.findings) outcome.set(id, { left: "declined", reason: askedReason(asked[n]?.id ?? "") });
   });
-  for (const a of artifact.attached) if (open.has(a.question)) outcome.set(a.id, { left: "declined", reason: attachedReason(a.question) });
+  const attached = new Map<string, { file: string; line: number }[]>();
+  for (const a of artifact.attached) {
+    if (!open.has(a.question)) continue;
+    outcome.set(a.id, { left: "declined", reason: attachedReason(a.question) });
+    attached.set(a.question, [...(attached.get(a.question) ?? []), ...placesOf(a.id)]);
+  }
+  if (attached.size > 0) {
+    updateQuestions(root, (q) => {
+      const more = attached.get(q.id);
+      if (more === undefined) return q;
+      const all = [...q.places, ...more];
+      return { ...q, places: all.filter((p, i) => all.findIndex((o) => o.file === p.file && o.line === p.line) === i) };
+    });
+  }
   return { asked, outcome };
 }
 
