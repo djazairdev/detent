@@ -8,7 +8,7 @@ import { bootstrapScaffold } from "./plan-write.js";
 import type { PresentChecks } from "./present-checks.js";
 import { slicesFromOutputs } from "./slice.js";
 import { placement } from "./slice-seed.js";
-import { planningMarkers } from "./write.js";
+import { planningMarkers } from "./write-handoff.js";
 
 /**
  * What the specification phase and SLICE left for planning to read, from the

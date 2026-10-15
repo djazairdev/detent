@@ -84,20 +84,34 @@ export const PRICE = {
   question: "Is borrowing free at launch, or two dollars a day?",
   why_asked: "It is the product's price, which is counted in money.",
   options: [
-    { answer: "Free in the MVP", consequence: "No revenue until pricing lands." },
-    { answer: "Two dollars a day", consequence: "The payment rail ships with the MVP." },
+    { answer: "Free in the MVP", consequence: "No revenue until pricing lands.", basis: "PRD.md:3, which makes borrowing free" },
+    { answer: "Two dollars a day", consequence: "The payment rail ships with the MVP.", basis: "docs/roadmap.md:4, which prices borrowing from launch" },
   ],
   settles: ["C1"],
 };
-export const LATE = { value: "A late return blocks new loans until the tool is back.", reason: "The queue rule the PRD implies.", settles: ["G1"] };
-export const REFUND = { value: "A refund keeps Stripe's processing fee.", reason: "Stripe's refund documentation, the claim's correction.", settles: ["K1"] };
+export const LATE = { value: "A late return blocks new loans until the tool is back.", reason: "The queue rule the PRD implies.", basis: "reasoning from PRD.md, which lends one tool at a time", settles: ["G1"] };
+export const REFUND = { value: "A refund keeps Stripe's processing fee.", reason: "Stripe's refund documentation, the claim's correction.", basis: "https://docs.stripe.com/refunds", settles: ["K1"] };
 export const TS_STACK = { language: "TypeScript", toolchain: "Node.js 24 with pnpm 10", scaffold_files: ["package.json"], gates: { test: "pnpm test" } };
-export const STACK_DEFAULT = { value: "TypeScript on Node.js 24 with pnpm.", reason: "The documents name no stack; this is the tooling they imply.", settles: ["stack"], stack: TS_STACK };
+export const STACK_DEFAULT = { value: "TypeScript on Node.js 24 with pnpm.", reason: "The documents name no stack; this is the tooling they imply.", basis: "reasoning from the documents, which name no stack", settles: ["stack"], stack: TS_STACK };
 
 /** Every item settled: the price asked, the rest defaulted, and the stack where it is open. */
 export const SORTED = (inputs: Json): Json => {
   const ids = (inputs["items"] as { id: string }[]).map((i) => i.id);
   return artifact({ questions: [PRICE], defaults: [LATE, REFUND, ...(ids.includes("stack") ? [STACK_DEFAULT] : [])] });
+};
+
+/**
+ * PRDR-340: the price as a default, numbered where the recommended answer was
+ * logged before C-3⁶, after the other defaults. Off a terminal a question is
+ * recorded open now, and is no entry a pack cites, so the tests of the phases
+ * after DECIDE settle every item by a default.
+ */
+export const PRICE_DEFAULT = { value: "Free in the MVP", reason: "The PRD is the later intent.", basis: "PRD.md:3, which makes borrowing free", settles: ["C1"] };
+
+/** Every item settled by a default, the price last, and the stack where it is open. */
+export const SETTLED = (inputs: Json): Json => {
+  const ids = (inputs["items"] as { id: string }[]).map((i) => i.id);
+  return artifact({ defaults: [LATE, REFUND, ...(ids.includes("stack") ? [STACK_DEFAULT] : []), PRICE_DEFAULT] });
 };
 
 const THROUGH_DECIDE = new Set(["INIT_FS", "DISCOVER", "AUDIT", "DECIDE"]);

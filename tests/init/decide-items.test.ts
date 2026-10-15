@@ -64,7 +64,7 @@ describe("PRDR-282: code checks the sorting (C-2¹²)", () => {
       "default 1 names Q7, which is not an item in your inputs",
       "1 item(s) settled by nothing: K1; every item is asked, defaulted or cited as settled",
     ]);
-    expect(check.kept.defaults).toEqual([{ ...LATE, settles: ["G1"] }]);
+    expect(check.kept.defaults).toEqual([{ ...LATE, touches: [], settles: ["G1"] }]);
     expect(check.unsorted.map((i) => i.id)).toEqual(["K1"]);
   });
 

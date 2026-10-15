@@ -99,7 +99,8 @@ describe("PRDR-278 the PRD records the specification phase and planning on its p
     const line = PRD.split("\n").find((l) => l.startsWith("The `init` pipeline (§4.1 of v2)")) ?? "";
     const pipeline = /`(INIT_FS[^`]*)`/u.exec(line)?.[1] ?? "";
     expect(pipeline.split("→").map((p) => p.trim())).toEqual([
-      "INIT_FS", "DISCOVER", "[AWAIT_DOCS]", "AUDIT", "DECIDE", "[AWAIT_INFO]", "WRITE", "VALIDATE", "[AWAIT_INFO]",
+      /* PRDR-340: no stop after DECIDE (C-3⁶). */
+      "INIT_FS", "DISCOVER", "[AWAIT_DOCS]", "AUDIT", "DECIDE", "WRITE", "VALIDATE", "[AWAIT_INFO]",
       "DETERMINE_VERIFICATION", "[AWAIT_BINDING_CHOICE | AWAIT_SETUP_CONSENT]",
       "SLICE", "PLAN", "PREPARE_AGENTS", "PRESENT", "[AWAIT_INFO | AWAIT_APPROVAL]", "READY",
     ]);

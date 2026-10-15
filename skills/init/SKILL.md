@@ -49,17 +49,19 @@ and the code, so re-invoking after an edit to either re-runs it, and a claim it
 has checked is not checked again.
 
 `DECIDE` (C-3⁗) sorts everything `AUDIT` left open, before anything plans from
-it. A decision counted in money or contracts is a question for the human; every
-other item is settled as a vetoable default, or by an entry the decision log,
-`docs/founder-decisions.md`, already holds. In a new project whose log records
-no stack, the stack is decided here (D-10′). On a terminal the questions are
-asked in screens of at most four, and each answer is written to the log as a
-decision. Invoked from this plugin there is no terminal, so `DECIDE` takes each
-recommended answer and writes it to the log as a vetoable default
-(specification decision 9); `PRESENT` lists every default, and the human vetoes
-one by editing its row and re-invoking. A question the log already answers is
-not asked again. An edit to the log re-runs `DECIDE` and the planning after
-it, never `AUDIT`.
+it. A decision that is the human's by what it affects is a question for the
+human (C-3⁶); every other item is settled as a vetoable default, or by an entry
+the decision log, `docs/founder-decisions.md`, already holds. In a new project
+whose log records no stack, the stack is decided here (D-10′). On a terminal
+the questions are asked in screens of at most four, and each answer is written
+to the log as a decision. Invoked from this plugin there is no terminal, so
+each question is recorded open as `Q-n` in `.detent/questions.md`, printed, and
+`init` goes on: no recommended answer is taken for the human (C-3⁶). The human
+answers in that file, and each phase boundary writes the answers given since
+to the log as decisions. `PRESENT` lists every default, and the human vetoes
+one by editing its row and re-invoking. A question the log already answers, or
+one still open, is not asked again. An edit to the log re-runs `DECIDE` and the
+planning after it, never `AUDIT`.
 
 `WRITE` (C-2¹³) rewrites the audited and decided documents into the pack, the
 layout C-2⁷ fixes under `docs/`: the decision log, `research/verified-facts.md`,
@@ -125,13 +127,22 @@ decision yourself.
 
 1. **`AWAIT_DOCS`** — raised at `DISCOVER` when no planning documents exist
    (C-2). Channel: the human supplies or names the documents; re-invoke.
-2. **`AWAIT_INFO`** — raised at `DECIDE`, at `VALIDATE` or at `PRESENT`, for
-   what only the human can settle. At `DECIDE` (C-3⁗), a human on a terminal
-   chose to answer later: the message lists every question with its options,
-   the recommended one first, and nothing was written to the decision log.
-   Channel: the human answers by re-running `detent init` on a terminal, or by
-   writing each answer as a row under `## Decisions` in
-   `docs/founder-decisions.md`; then re-invoke. At `VALIDATE` (C-2¹⁴), the
+2. **`AWAIT_INFO`** — raised at `VALIDATE` or at `PRESENT`, for what only the
+   human can settle. `DECIDE` raises none (C-3⁶): a question it asks that
+   nobody answers on a terminal is recorded open as `Q-n` in
+   `.detent/questions.md` and printed, and `init` goes on. The human answers
+   after the question's `Answer:`, by an option's number or in their own
+   words, and the next phase boundary writes the answer to
+   `docs/founder-decisions.md` as a decision. Relay a question as printed and
+   never answer it yourself. `VALIDATE` applies each answer where the pack
+   cites its question; `PLAN` drafts every slice that rests on no question
+   still open, and a slice that does waits. At `PRESENT` (C-3⁶), while a
+   question is open, or answered and not yet applied, `init` stops once, with
+   each question and its options and the slices that wait; approval is not
+   offered on either exit. Channel: the human answers in
+   `.detent/questions.md`; then re-invoke, and `init` applies the answers,
+   re-validates where they land and plans the slices that waited. At
+   `VALIDATE` (C-2¹⁴), the
    review rounds reached their ceiling with a blocker left open, or the pack
    checker stayed red: the message lists each one at its `file:line`. Channel:
    the human settles each in the pack, or, for a blocker, raises

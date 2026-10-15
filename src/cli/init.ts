@@ -308,7 +308,7 @@ export async function main(argv: readonly string[], mainDeps: InitMainDeps = {})
         : approvalFlag === undefined && interactive
           ? { acceptMixedBuilds: makeTtyMixedBuilds() }
           : {}),
-      /* C-3⁗ (PRDR-282): DECIDE asks on a terminal; anywhere else it takes each recommended answer as a vetoable default (specification decision 9). */
+      /* C-3⁗ (PRDR-282): DECIDE asks on a terminal; anywhere else it records each question open, for the founder to answer in `.detent/questions.md` (C-3⁶). */
       ...(interactive ? { askDecisions: makeTtyDecisions() } : {}),
     });
 
@@ -321,6 +321,8 @@ export async function main(argv: readonly string[], mainDeps: InitMainDeps = {})
           setInFlight(text);
           noteRunPhase(root, text);
         },
+        /* C-3⁶ (PRDR-340): an answer written to the decision log at a phase boundary is said as it is written. */
+        note: (text) => process.stdout.write(`  ${text}\n`),
       });
     } catch (err) {
       /*

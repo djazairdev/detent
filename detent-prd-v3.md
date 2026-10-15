@@ -1022,6 +1022,8 @@ D-1…D-25 carry forward from v2.0-draft.7. D-2, D-19, and D-22 are amended as b
   drafts each numbered from one.
   *Amended by C-3⁗ (PRDR-278): DECIDE asks this class of question, and records every other
   decision as a vetoable default in the decision log.*
+  *Amended by C-3⁶ (PRDR-338): the founder's class is drawn by what a choice affects, not by money
+  or contracts alone, and every default names its basis and the founder decisions it touches.*
 
 - **F-1‴ (3.1.1, PRDR-118; renumbered from F-1′ by PRDR-287).** A ticket id is a FILE NAME under `.detent/plan/`, and a model
   writes it. It is therefore constrained like one: lowercase, alphanumeric with `-` and `_`,
@@ -1839,6 +1841,8 @@ the code does what the rules it amends describe, and each of those rules points 
   may simulate, and where the machine has no sandbox each round says why none can.*
   *Amended by C-3⁵ (PRDR-298): planning research is deleted. AUDIT keeps what it shared with it:
   the one relaunch, X-6a's local search before the web, and `EXTERNAL_TIER`.*
+  *Amended by C-3⁶ (PRDR-338): DECIDE, WRITE and VALIDATE ask the founder's questions and never stop
+  for them; `init` stops for open questions once, just before PRESENT.*
 
 - **C-2⁷ (3.1.1, PRDR-278).** The pack has a fixed schema, a committed conformance record and a
   deterministic checker (specification decision 4), so that `init` and the operator can tell a
@@ -1932,6 +1936,8 @@ the code does what the rules it amends describe, and each of those rules points 
   question list, and PRESENT lists every `D-n` before the `X-n`.*
   *Amended by C-3⁵ (PRDR-298): built. `similarQuestions` is DECIDE's own, in
   `src/init/decide-items.ts`, and the rest of the question machinery is gone.*
+  *Amended by C-3⁶ (PRDR-338): a question stops nothing where it is found. Off a TTY it stays open,
+  `later` leaves it open, and `init`'s one stop for questions is just before PRESENT.*
 
 - **C-3⁵ (3.1.1, PRDR-298).** What the planning redesign replaced is deleted, and what the
   planning audit found describing more than the code does now says what it does. This settles
@@ -3423,6 +3429,8 @@ the code does what the rules it amends describe, and each of those rules points 
   is handed the foundations' text as its system prompt, and they count as read.*
   *Amended by C-2²⁸ (PRDR-333): a first round's finding that leaves out `previous` reads as null,
   and a verification's keeps the field required.*
+  *Amended by C-2²⁹ (PRDR-338): the writer asks or attaches a finding whose fix is the founder's,
+  a blocker after a blocker is asked, and neither counts for the stop rule.*
 
 - **S-1⁗ (3.1.1, PRDR-285).** S-1‴'s sandbox is built, on macOS: VALIDATE's reviewers may run
   throwaway scripts in a scratch directory their round makes, and nothing a script does reaches past
@@ -4106,7 +4114,134 @@ they need a real second round first.
   effort set by risk and by code quality: risk is known before a session starts, and the only
   evidence of how the code is going is Detent's own checks.
 
-The `init` pipeline (§4.1 of v2) is **inherited** in its phases and interrupts — since C-2‴/C-3′ (3.1.1), and since C-2⁶/D-10′ (3.1.1, PRDR-278): `INIT_FS → DISCOVER → [AWAIT_DOCS] → AUDIT → DECIDE → [AWAIT_INFO] → WRITE → VALIDATE → [AWAIT_INFO] → DETERMINE_VERIFICATION → [AWAIT_BINDING_CHOICE | AWAIT_SETUP_CONSENT] → SLICE → PLAN → PREPARE_AGENTS → PRESENT → [AWAIT_INFO | AWAIT_APPROVAL] → READY`; the interrupt set is the same five (C-3⁗) — and re-surfaced as plugin commands and skills. C-1…C-8 hold as the dated entries above amend them (with "kernel" → "referee"). v3 restates only the surface and the loop ownership:
+**The founder decides, and `init` does not wait (PRDR-338, 2026-10-11).** The rules C-3⁶ and
+C-2²⁹ below were recorded on 2026-10-11, before any code, as N-6 requires. They carry the
+maintainer's three decisions of that day, made while watching `init` on a real project, Hearth, and
+recorded in PRDR-338: Detent settles only what a primary source or reasoning settles, and asks the
+founder every other decision (1); the line is drawn by what a choice affects, not by whether
+engineers would agree (2); and a question stops only the work that depends on its answer, never
+`init` where it is found (3). PRDR-339 to PRDR-344 build them; until each lands, the code does what
+the rules it amends describe, and each of those rules points here.
+
+- **C-3⁶ (PRDR-338, 2026-10-11).** What is the founder's, and how it is asked. C-3″ asked only
+  about a decision counted in money or contracts, and settled the rest. On Hearth, DECIDE asked one
+  question and settled 94 items as defaults, three of which reworded the founder's own decisions,
+  and WRITE and VALIDATE's writer added 18 more.
+  - **The line.** Detent settles a problem when a primary source, in the documents or found by web
+    search, or reasoning from the documents settles it, or when it is an engineering choice inside
+    the founder's goals that is easy to reverse, such as a timeout, a retry count, a window or a
+    file layout. Everything else is the founder's: what C-3″ lists; a choice that changes what the
+    product does, promises, protects or costs; one that trades one goal against another; one that
+    changes scope or which milestone ships what; and any change to a founder decision's meaning,
+    wherever the pack records it. A corrected fact is Detent's, and the response to it is the
+    founder's when more than one response is workable. On Hearth's 113 defaults the line gives 11
+    founder's decisions and 6 borderline; asking whether two engineers would agree gave about 55.
+  - **A default declares what it touches.** Every default names its basis, a source, the passages
+    or the reasoning, and every founder decision it touches, applied unchanged or changed. Code
+    refuses a default with no basis and one that changes a founder decision, and DECIDE asks it
+    instead. Neither signal sorts alone, so VALIDATE's reviewers read the log as a second reader
+    (C-2²⁹).
+  - **A question's options are claims.** Each option's consequence names its basis, and one with
+    none is refused. A reviewer who finds a consequence wrong flags it (C-2²⁹). The corrected
+    question is announced again, and an answer given to its earlier wording goes back to the
+    founder rather than being applied.
+  - **Asked, never waited on.** A question is asked where it is found, at DECIDE, WRITE or
+    VALIDATE, and recorded open as `Q-n` in `.detent/questions.md`, outside the pack, with its
+    options, the recommended one first, what each means, and the places that depend on it. It is
+    printed at once. Off a TTY no recommended answer is taken for the founder, and the question
+    stays open (amending specification decision 9). On a TTY DECIDE shows its screens as C-3⁗
+    says, and `later` leaves their questions open instead of raising AWAIT_INFO. `init` carries on
+    with everything that does not depend on an answer (amending specification decision 5).
+  - **The pack is written around an open question.** WRITE writes each place that depends on one
+    as its recommended option and cites its `Q-n` there, as it cites a default, and the pack
+    checker resolves a `Q-n` as it resolves an `X-n`. WRITE and VALIDATE's writer add no default
+    the line makes the founder's: they ask it.
+  - **Answers flow in.** The founder answers in the questions file at any time. Code reads it at
+    each phase boundary and before each VALIDATE round's writer, and writes each answer to the
+    decision log as a `D-n` between writer batches, so no batch's restore or rollback of the log
+    undoes it (C-2¹⁴). The next writer applies the answer where its `Q-n` is cited and at the
+    places its question records, those its findings, and any attached to it, were found at, and
+    cites its `D-n` in each of their documents; until it does, the answer is not applied. The round
+    after verifies it (C-2²⁹). An answer applied mid-run starts neither a DECIDE nor a WRITE
+    session on a pack WRITE has written: both re-run in code, since their keys name the log
+    (P9), and write nothing.
+  - **Planning plans around open questions.** SLICE cuts the whole pack as written. PLAN drafts
+    every slice that holds no requirement citing an open `Q-n`, and a slice that does waits for its
+    answer. When every phase has done what it can, `init` raises AWAIT_INFO once, just before
+    PRESENT, and lists what is still open. The next `detent init` applies the answers given since
+    and plans the slices that waited, re-planning only those whose inputs changed (C-8⁵). PRESENT,
+    and so approval, needs every question answered: the whole project is checked and planned
+    before anything is built (cost decision 2).
+  - **Blocking stays a veto.** Stopping `init` at each question, at DECIDE, after WRITE and after a
+    VALIDATE round, was the first design, and is PRDR-338's vetoable call 2. It reads no answer
+    mid-run and cites no open place, but an unattended run idles until someone answers: on Hearth,
+    8½ hours at DECIDE.
+  The five interrupts stay five: the one stop raises AWAIT_INFO.
+  *Built by PRDR-339: DECIDE draws the line, every default names its `basis` and the founder
+  decisions it `touches`, every option names its `basis`, and a default that changes a founder
+  decision is refused (`src/init/decide-items.ts`, `prompts/spec_write.md`).*
+  *Built by PRDR-340: DECIDE records a question nobody answers on a TTY open as `Q-n`
+  (`.detent/state/questions.json`, rendered to `.detent/questions.md`), prints it, and completes;
+  an open question settles its items, and each phase boundary writes the answers given since to
+  the decision log (`src/init/founder-questions.ts`). DECIDE raises no AWAIT_INFO. WRITE, VALIDATE
+  and planning did not yet read an open question then: PRDR-341 to PRDR-344 built that.*
+  *Built by PRDR-341: WRITE is told the open questions and cites each where the pack depends on it,
+  asks what it finds open that is the founder's, and declares every default it adds; code refuses
+  an undeclared default and one that changes a founder decision, and the checker resolves `Q-n`
+  against the questions record. While the question that settles the stack is open, the checker
+  does not call the stack missing, and DETERMINE_VERIFICATION, which binds it, says where to
+  answer it (`src/init/write-asks.ts`, `src/init/pack-check.ts`).*
+  *Built by PRDR-343: answers flow into VALIDATE: code reads them before each round's writer and
+  writes each to the log before the first batch; the writer applies each where its `Q-n` is cited and
+  cites its `D-n`, and code refuses an account that leaves one cited; a log only answers moved does
+  not scope a round, at a phase boundary either, so the round after reviews where they landed; and a
+  question a reviewer found wrong is corrected and asked again, an answer given to its earlier
+  wording put back to the founder (`src/init/validate-answers.ts`). Planning around an open question
+  is PRDR-344's.*
+  *Built by PRDR-344: PLAN drafts every slice that cites no question the pack does not yet hold the
+  answer to, and one that does waits, named with its questions; PRESENT holds approval with
+  AWAIT_INFO while a question is open or answered and not yet applied, listing each with its options
+  and the slices that wait, and `run`'s exit holds it too; the next `detent init` applies the answers
+  and plans the slices that waited (`src/init/plan-waits.ts`).*
+  *Fixed by #45 (2026-10-14): a question VALIDATE's writer asks is cited nowhere in the pack, and
+  PRDR-343 read only `Q-n` cites, so it marked such an answer applied when none was: on Hearth,
+  four answers reached the writer as none. An answer now applies where its `Q-n` is cited and at
+  the places its question records, in the documents the writer may change; it stays unapplied, and
+  so unsettled for planning, until each of those documents cites its `D-n`, and a finding attached
+  to an open question adds its places to the question's (`src/init/validate-answers.ts`,
+  `src/init/validate-asks.ts`).*
+
+- **C-2²⁹ (PRDR-338, 2026-10-11).** VALIDATE asks what its rounds cannot settle. C-2¹⁴'s writer
+  patched every finding, and the loop asked only at its ceiling (specification decision 13). On
+  Hearth, two blockers came back in the same place, one for three rounds and one for four, each a
+  design choice a person settles in minutes.
+  - **The writer asks or attaches.** VALIDATE's writer applies a finding only when C-3⁶'s line
+    makes its fix Detent's. A finding whose fix is the founder's is asked as a question, with its
+    places, the reviewer's `why` and the options, and is not patched. A finding on a place that
+    cites an open `Q-n`, whose fix that answer would settle, is attached to the question and is not
+    patched either; its places become the question's, where its answer applies (#45). The round's other fixes go ahead, and the loop carries on. Each is recorded
+    `declined`, with a reason naming its question, so the conformance record keeps its shape (F-3).
+  - **The reviewers are the second reader.** They read the questions file with the foundations,
+    and flag a default the line makes the founder's, a fix that would take a founder's decision,
+    and an option whose consequence is wrong.
+  - **A repeated blocker is asked.** A blocker of round N whose `previous` names a blocker of round
+    N−1 is asked as the founder's, whatever it was marked: two rounds of patches show reasoning is
+    not settling it. Its question lists the chain, every id back to the first round's finding, each
+    at its `file:line`. A blocker after a major starts a chain, and does not end one.
+  - **The stop rule counts what Detent can fix.** Asked and attached findings do not count among a
+    round's blockers and majors for specification decision 3's stop rule, which this amends. The
+    ceiling stays 8, and still governs technical majors.
+  - **An answer is re-validated where it lands.** The round after an answer reviews the places it
+    applies at and the documents that cite them, not every document that cites any decision,
+    as a changed log scopes a round under C-2¹⁴.
+  *Built by PRDR-342: VALIDATE's writer asks a finding whose fix is the founder's and attaches one an
+  open question settles, and declares every default it adds; each reviewer reads the questions and
+  reports the `founder` category; a blocker after a blocker reaches the writer marked with its chain,
+  which its question lists; and what waits on a question counts for neither the stop rule nor the
+  ceiling's stop (`src/init/validate-asks.ts`). An answer applied inside a round, and re-validated
+  where it lands, is PRDR-343's.*
+
+The `init` pipeline (§4.1 of v2) is **inherited** in its phases and interrupts — since C-2‴/C-3′ (3.1.1), and since C-2⁶/D-10′ (3.1.1, PRDR-278), and since C-3⁶ (PRDR-340), which takes away the stop after DECIDE: `INIT_FS → DISCOVER → [AWAIT_DOCS] → AUDIT → DECIDE → WRITE → VALIDATE → [AWAIT_INFO] → DETERMINE_VERIFICATION → [AWAIT_BINDING_CHOICE | AWAIT_SETUP_CONSENT] → SLICE → PLAN → PREPARE_AGENTS → PRESENT → [AWAIT_INFO | AWAIT_APPROVAL] → READY`; the interrupt set is the same five (C-3⁗) — and re-surfaced as plugin commands and skills. C-1…C-8 hold as the dated entries above amend them (with "kernel" → "referee"). v3 restates only the surface and the loop ownership:
 
 - **C-1′** `init` and `run` are the plugin's two commands (`/detent:init`, `/detent:run`), and Detent registers skills so the model invokes the right phase from natural intent ("plan this repo", "keep going"). The headless driver exposes the same two as the retained CLI verbs. C-1's git-root rule and the five C-5 interrupts are unchanged; interrupts are surfaced as the plugin's **presented decisions**, still a closed set of five.
   *AC:* the plugin manifest registers exactly two commands; a docs test asserts the five-decision closed set; subdirectory invocation still exits/《presents》 the root hint with no `.detent/` created.

@@ -155,9 +155,10 @@ describe("PRDR-283: code checks what WRITE wrote (C-2¹³)", () => {
     const withX5 = (r: string): string => read(r, DECISION_LOG_PATH).replace(/(\| X-4 \|[^\n]*\n)/u, "$1| X-5 | A loan lasts seven days. | The documents imply a week. |\n");
     const bare = LENDING.replace("(X-2; facts §1.1)", "(facts §1.1)");
     const stub = write((n) => ({ files: { ...PACK, "docs/prd/01-lending.md": n === 0 ? bare : LENDING }, artifact: WROTE() }));
+    /* PRDR-341: a default WRITE adds is declared, as DECIDE declares one (C-3⁶). */
     const adds = write((n, _, r) => ({
       files: { ...PACK, "docs/prd/01-lending.md": n === 0 ? bare : LENDING.replace("(X-1)", "(X-1, X-5)"), ...(n === 0 ? { [DECISION_LOG_PATH]: withX5(r) } : {}) },
-      artifact: WROTE(),
+      artifact: WROTE({ defaults: [{ id: "X-5", basis: "the documents imply a week", touches: [] }] }),
     }));
     await initThroughWrite(root, stub);
     expect(issueOf(stub.inputs[1])).toContain("the pack does not cite X-2, which settles K1");

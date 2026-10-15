@@ -184,7 +184,8 @@ export async function determineVerification(deps: DetermineDeps): Promise<PhaseO
           "so there is nothing to bind a gate to.",
           "",
           `Record it under \`## Stack\` in ${DECISION_LOG_PATH}, with the root package's gate commands`,
-          "under `## Packages`, and re-run `detent init`.",
+          "under `## Packages`, and re-run `detent init`. Where DECIDE asked it, it is an open question in",
+          "`.detent/questions.md`: answer it there, and the next phase boundary records the stack (C-3⁶).",
         ].join("\n"),
         items: ["stack"],
       };

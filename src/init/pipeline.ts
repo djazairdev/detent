@@ -1,4 +1,5 @@
 import { discover as discoverStack, gatherFacts } from "../adapter/discover/index.js";
+import { unsettled, unsettledQuestions } from "./plan-waits.js";
 import { ROOT_PACKAGE, findPackages, gateLabel, packageDir } from "../adapter/packages.js";
 import { initLayout, stateDir } from "../fs/layout.js";
 import type { Budgets } from "../schemas/budgets.js";
@@ -28,7 +29,8 @@ import { CONFORMANCE_RECORD_PATH, DECISION_LOG_PATH } from "../schemas/pack.js";
 import { sessionDeps } from "./session-deps.js";
 import { auditPhase } from "./audit.js";
 import { decidePhase, planningDocs, type DecideAsk } from "./decide.js";
-import { planningMarkers, writePhase } from "./write.js";
+import { writePhase } from "./write.js";
+import { planningMarkers } from "./write-handoff.js";
 import { validatePhase } from "./validate.js";
 import { isGreenfield } from "./greenfield.js";
 import { placement } from "./slice-seed.js";
@@ -88,7 +90,7 @@ export interface PipelineDeps {
    * without an asker of its own.
    */
   readonly askApproval?: (presentation: string) => Promise<ApprovalDecision>;
-  /** C-3⁗ (PRDR-282): DECIDE's questions, asked on a terminal; absent, each recommended answer is taken (specification decision 9). */
+  /** C-3⁗ (PRDR-282): DECIDE's questions, asked on a terminal; absent, each is recorded open for the founder (C-3⁶, PRDR-340). */
   readonly askDecisions?: DecideAsk;
   /** S-1⁗ (PRDR-285): the sandbox VALIDATE's reviewers simulate in, asked when a round first runs; absent, this machine is probed. */
   readonly sandbox?: () => Promise<Sandbox>;
@@ -320,6 +322,8 @@ function planPhase(deps: PipelineDeps): PhaseHandler {
         ctx.outputs["DETERMINE_VERIFICATION"]?.["packages"] ?? null,
         ctx.outputs["SLICE"]?.["slices"] ?? null,
         planPrompts(deps),
+        /* C-3⁶ (PRDR-344): which slices wait turns on which questions the pack does not yet hold the answer to. */
+        unsettled(deps.root).map((q) => q.id),
       ])}`,
     /** C-8‴: the tickets and the plan artifact are PLAN's output; if they are gone, plan again. */
     outputIntact: () => planOutputIntact(deps.root),
@@ -402,6 +406,8 @@ function presentPhase(deps: PipelineDeps): PhaseHandler {
         ctx.outputs["PLAN"]?.["tickets"] ?? null,
         ctx.outputs["PREPARE_AGENTS"]?.["assignments"] ?? null,
         presentInputsFromOutputs(ctx.outputs),
+        /* C-3⁶ (PRDR-344): a question answered or asked moves what PRESENT holds approval for. */
+        unsettled(deps.root).map((q) => [q.id, q.decision, q.applied]),
       ]),
     run: async (ctx) => {
       const stored = readBindings(deps.root);
@@ -413,6 +419,8 @@ function presentPhase(deps: PipelineDeps): PhaseHandler {
         skips: stored.skips,
         packages: stored.packages,
         checks: presentChecks(deps.root, ctx.outputs),
+        /* C-3⁶ (PRDR-344): read when PRESENT runs, as the founder answers between runs. */
+        questions: unsettledQuestions(deps.root),
         bootstrap: (ctx.outputs["PLAN"]?.["bootstrap"] as string | null | undefined) ?? null,
         assignments: (ctx.outputs["PREPARE_AGENTS"]?.["assignments"] as Record<string, string> | undefined) ?? {},
         ...inputs,

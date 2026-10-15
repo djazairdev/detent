@@ -9,7 +9,7 @@ import { readBindings } from "../../src/adapter/drift.js";
 import { DECISION_LOG_PATH } from "../../src/schemas/pack.js";
 import { SCHEMA_VERSION } from "../../src/schemas/common.js";
 import { LONE_CANDIDATE, repo, planning } from "./plan-fixture.js";
-import { DOCS, LATE, REFUND, SORTED, SURVEY, TS_STACK, artifact, auditFinds, decide, initThrough, type Json } from "./decide-fixture.js";
+import { DOCS, LATE, REFUND, SETTLED, SURVEY, TS_STACK, artifact, auditFinds, decide, initThrough, type Json } from "./decide-fixture.js";
 import { R, TWO_SLICES, scriptedPlanner, twoSliceDraft } from "./slicing-fixture.js";
 
 /**
@@ -32,7 +32,7 @@ describe("PRDR-282: PRESENT lists every vetoable default (C-3⁗)", () => {
   it("shows each X-n with its reason, and no planning question, since no planning stage asks (C-4⁵)", async () => {
     const root = repo({ ...PROJECT, [DECISION_LOG_PATH]: REGION });
     const log: string[] = [];
-    const result = await initThrough(root, decide((_, i) => SORTED(i)), {
+    const result = await initThrough(root, decide((_, i) => SETTLED(i)), {
       all: true,
       script: { ...planning(scriptedPlanner({ draft: twoSliceDraft, review: () => ({ schema_version: SCHEMA_VERSION, verdict: "approve", findings: [] }) }, log)) },
     });
@@ -67,7 +67,7 @@ describe("PRDR-282: every slice plans with the decision log (C-2¹²)", () => {
   it("hands the log to SLICE and to each slice's draft, whatever documents the slice names", async () => {
     const root = repo(PROJECT);
     const seen: Record<string, unknown>[] = [];
-    await initThrough(root, decide((_, i) => SORTED(i)), {
+    await initThrough(root, decide((_, i) => SETTLED(i)), {
       all: true,
       script: { ...planning(scriptedPlanner({ slices: TWO_SLICES, draft: twoSliceDraft, review: () => ({ schema_version: SCHEMA_VERSION, verdict: "approve", findings: [] }) }, [], seen)) },
     });
@@ -84,7 +84,7 @@ describe("PRDR-282: every slice plans with the decision log (C-2¹²)", () => {
     const root = repo(PROJECT);
     const seen: Record<string, unknown>[] = [];
     const bare = { ...TWO_SLICES, slices: TWO_SLICES.slices.map((sl) => (sl.id === "s02" ? { ...sl, docs: [] } : sl)) };
-    await initThrough(root, decide((_, i) => SORTED(i)), {
+    await initThrough(root, decide((_, i) => SETTLED(i)), {
       all: true,
       script: { ...planning(scriptedPlanner({ slices: bare, draft: twoSliceDraft, review: () => ({ schema_version: SCHEMA_VERSION, verdict: "approve", findings: [] }) }, [], seen)) },
     });
@@ -96,7 +96,7 @@ describe("PRDR-282: every slice plans with the decision log (C-2¹²)", () => {
     const root = repo(PROJECT);
     const log: string[] = [];
     const planner = scriptedPlanner({ slices: TWO_SLICES, draft: twoSliceDraft, review: () => ({ schema_version: SCHEMA_VERSION, verdict: "approve", findings: [] }) }, log);
-    const stub = decide((_, i) => SORTED(i));
+    const stub = decide((_, i) => SETTLED(i));
     await initThrough(root, stub, { all: true, script: { ...planning(planner) }, more: approved });
 
     log.length = 0;
@@ -115,7 +115,7 @@ describe("PRDR-282, PRDR-290: in greenfield the planning phases plan on the stac
   it("hands SLICE and PLAN the entry, read from the log where WRITE wrote no pack, and the bindings follow it", async () => {
     const root = repo({ ...DOCS });
     const seen: Record<string, unknown>[] = [];
-    await initThrough(root, decide((_, i) => SORTED(i)), {
+    await initThrough(root, decide((_, i) => SETTLED(i)), {
       all: true,
       script: { ...planning(scriptedPlanner({ draft: twoSliceDraft, review: () => ({ schema_version: SCHEMA_VERSION, verdict: "approve", findings: [] }) }, [], seen)) },
     });
@@ -131,7 +131,7 @@ describe("PRDR-282, PRDR-290: in greenfield the planning phases plan on the stac
   it("re-binds when a veto edits the entry's gate command in the log", async () => {
     const root = repo({ ...DOCS });
     const planner = scriptedPlanner({ draft: twoSliceDraft, review: () => ({ schema_version: SCHEMA_VERSION, verdict: "approve", findings: [] }) }, []);
-    const stub = decide((_, i) => SORTED(i));
+    const stub = decide((_, i) => SETTLED(i));
     await initThrough(root, stub, { all: true, script: { ...planning(planner) }, more: approved });
     const file = decisionLogFile(root);
     const log = readFileSync(file, "utf8");
@@ -148,7 +148,7 @@ describe("PRDR-282, PRDR-290: in an existing project the stack is discovered, no
     const withStack = "# Founder decisions\n\n## Stack\n\n| Field | Value |\n|---|---|\n| decision | X-9 |\n| language | Go |\n| toolchain | Go 1.24 |\n";
     const root = repo({ ...PROJECT, [DECISION_LOG_PATH]: withStack });
     const seen: Record<string, unknown>[] = [];
-    await initThrough(root, decide((_, i) => SORTED(i)), {
+    await initThrough(root, decide((_, i) => SETTLED(i)), {
       all: true,
       script: { ...planning(scriptedPlanner({ draft: twoSliceDraft, review: () => ({ schema_version: SCHEMA_VERSION, verdict: "approve", findings: [] }) }, [], seen)) },
     });
@@ -168,7 +168,7 @@ describe("PRDR-282: DECIDE stands off the chain, so AUDIT's re-runs re-plan only
     const root = repo(PROJECT);
     const log: string[] = [];
     const planner = scriptedPlanner({ slices: TWO_SLICES, draft: twoSliceDraft, review: approve }, log);
-    const stub = decide((n, i) => (n === 0 ? SORTED(i) : artifact({ settled: [{ item: "G1", entry: "X-1" }], defaults: (i["items"] as { id: string }[]).some((x) => x.id === "R1") ? [{ value: "The plan follows the PRD: borrowing is free.", reason: "The PRD is the later intent.", settles: ["R1"] }] : [] })));
+    const stub = decide((n, i) => (n === 0 ? SETTLED(i) : artifact({ settled: [{ item: "G1", entry: "X-1" }], defaults: (i["items"] as { id: string }[]).some((x) => x.id === "R1") ? [{ value: "The plan follows the PRD: borrowing is free.", reason: "The PRD is the later intent.", basis: "PRD.md:3", settles: ["R1"] }] : [] })));
     await initThrough(root, stub, { all: true, script: { ...planning(planner) }, more: approved });
     let edits = 0;
     const again = async (survey: Json) => {

@@ -113,6 +113,19 @@ export function openItems(audit: Json | undefined, opts: { readonly stackOpen: b
   return items;
 }
 
+/** C-3⁶ (PRDR-340): the places the items quote, each `file:line` once, in the order they come: what depends on a question's answer. */
+export function placesOf(items: readonly Item[]): { file: string; line: number }[] {
+  const places = new Map<string, { file: string; line: number }>();
+  for (const item of items) {
+    for (const p of [...list(item.shown["passages"]), ...list(item.shown["places"]), ...list([item.shown["passage"]])]) {
+      const file = text(p["file"]);
+      const line = p["line"];
+      if (file !== "" && typeof line === "number" && Number.isInteger(line) && line > 0) places.set(`${file}:${String(line)}`, { file, line });
+    }
+  }
+  return [...places.values()];
+}
+
 export interface DecideCheck {
   /** Empty when the artifact sorts every item once and cites only what exists. */
   readonly issues: readonly string[];
@@ -128,9 +141,11 @@ const stackIn = (q: DecideQuestion): number => q.options.filter((o) => o.stack !
  * Check a DECIDE artifact against the items it was given and the log. Every
  * item is settled once, by a question, a default or an entry the log holds;
  * every id it names is one of the items; only the stack's settler carries a
- * stack, whole; and no question is one the log already answers, in the words
- * C-3‴ can compare. What fails is named in `issues` and taken out of `kept`,
- * and an item left with no settler is `unsorted`.
+ * stack, whole; no question is one the log already answers, in the words
+ * C-3‴ can compare; and no default changes a founder decision it declares it
+ * touches, which is the founder's to make (C-3⁶, PRDR-339). What fails is
+ * named in `issues` and taken out of `kept`, and an item left with no settler
+ * is `unsorted`.
  */
 export function checkDecide(artifact: DecideArtifact, items: readonly Item[], log: LogView): DecideCheck {
   const issues: string[] = [];
@@ -169,7 +184,8 @@ export function checkDecide(artifact: DecideArtifact, items: readonly Item[], lo
     const answered = answeredBy(q.question);
     if (answered !== undefined) {
       /* Kept as what it is: its items are the log's to settle, since the log answers it. */
-      issues.push(`${who} ("${q.question}") is one the decision log already answers, as ${answered.id}; cite it in settled instead (C-3‴)`);
+      const already = answered.id.startsWith("Q-") ? `is already asked and open, as ${answered.id}` : `is one the decision log already answers, as ${answered.id}`;
+      issues.push(`${who} ("${q.question}") ${already}; cite it in settled instead (C-3‴)`);
       for (const item of claim(q.settles.filter((id) => id !== "stack"), `the log's ${answered.id}`)) settled.push({ item, entry: answered.id });
       return;
     }
@@ -192,6 +208,13 @@ export function checkDecide(artifact: DecideArtifact, items: readonly Item[], lo
     const carries = d.stack !== undefined;
     if (carries !== d.settles.includes("stack") || (carries && !stackOpen)) {
       issues.push(`${who} ${carries ? "carries a stack but does not settle the open stack" : "settles the stack without carrying one"} (D-10′)`);
+      return;
+    }
+    const changed = d.touches.filter((t) => t.effect === "changes").map((t) => t.decision);
+    if (changed.length > 0) {
+      issues.push(
+        `${who} changes the founder decision ${changed.join(", ")}; a change to a founder decision is the founder's to make, so ask it as a question (C-3⁶)`,
+      );
       return;
     }
     const ids = claim(d.settles, who);

@@ -1,4 +1,8 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import type { FounderQuestion } from "../schemas/founder-questions.js";
+import { questionsInterrupt, type WaitingSlice } from "./plan-waits.js";
+/* C-3⁶ (PRDR-344): `run`'s exit holds approval on the same questions as this one. */
+export { questionsRefusal } from "./plan-waits.js";
 import path from "node:path";
 import { stateDir, writeArtifact } from "../fs/layout.js";
 import { SCHEMA_VERSION, parseArtifact } from "../schemas/common.js";
@@ -115,6 +119,10 @@ export interface PresentInput {
   readonly reviewRisks?: readonly PlanRisk[];
   /** C-4⁸: the slices no review read, and why. */
   readonly unreviewed?: readonly UnreviewedSlice[];
+  /** C-3⁶ (PRDR-344): the slices PLAN did not draft, each waiting for the founder's answers. */
+  readonly waiting?: readonly WaitingSlice[];
+  /** C-3⁶ (PRDR-344): the questions the pack does not yet hold the answer to; while one is, approval is not offered. */
+  readonly questions?: readonly FounderQuestion[];
   /** C-7‴ (PRDR-296): what `init` has spent on the root, by phase; reported, never capped (decision 16). */
   readonly spend?: readonly PhaseSpend[];
   /** N-5″ (PRDR-297): the Detent builds that made the plan, and what each made (`plan-builds.ts`). */
@@ -245,10 +253,14 @@ export async function presentStage(deps: PresentDeps): Promise<PhaseOutcome> {
     presentation,
     plan_hash: planHash(deps.root),
     spec_defects: (deps.specDefects ?? []).length,
+    open_questions: (deps.questions ?? []).length,
     check_failures: failures.length,
     ...made,
   } satisfies Presentation);
 
+  /** C-3⁶ (PRDR-344): so does every question the pack does not yet hold the answer to, listed with its options, and the slices that wait. */
+  const asking = questionsInterrupt(presentation, deps.questions ?? [], deps.waiting ?? []);
+  if (asking !== null) return asking;
   /** C-4⁵ (PRDR-292): an open spec defect holds approval, and the operator is told each one and how a re-run closes it. */
   const defective = defectInterrupt(presentation, deps.specDefects ?? []);
   if (defective !== null) return defective;

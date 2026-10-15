@@ -1,19 +1,23 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
-import { stateDir, writeArtifact } from "../fs/layout.js";
+import { stateDir } from "../fs/layout.js";
 import { noteUnitComplete } from "../kernel/ledger.js";
 import { SCHEMA_VERSION, parseArtifact } from "../schemas/common.js";
-import { decideArtifactSchema, decideRecordSchema, type DecideArtifact, type DecideQuestion, type DecideRecord } from "../schemas/decide.js";
+import { decideArtifactSchema } from "../schemas/decide.js";
+import type { FounderQuestion } from "../schemas/founder-questions.js";
 import { DECISION_LOG_PATH } from "../schemas/pack.js";
 import { isGreenfield } from "./greenfield.js";
 import { checkDecide, openItems, type DecideCheck, type Item } from "./decide-items.js";
-import { appendToDecisionLog, decisionLogFile, nextId, readDecisionLog, type DecidedStack, type LogAdditions, type LogView } from "./decide-log.js";
-import { decideNotes, deferredMessage } from "./decide-notes.js";
+import { readDecideRecord, writeDecideRecord } from "./decide-record.js";
+import { appendToDecisionLog, decisionLogFile, readDecisionLog, type LogView } from "./decide-log.js";
+import { askAll, founderQuestion, settle, type DecideAsk } from "./decide-settle.js";
+import { decideNotes } from "./decide-notes.js";
 import { contentsDigest, valueDigest, type PhaseHandler, type PhaseOutcome } from "./machine.js";
 import type { PipelineDeps } from "./pipeline.js";
 import { refusedAttemptInput, withOneRelaunch } from "./retry.js";
 import { sessionDeps } from "./session-deps.js";
+import { askQuestions, openQuestions, readQuestions, standingEntry } from "./founder-questions.js";
 import { launchInitSession, withInitJournal } from "./session.js";
 
 /**
@@ -28,56 +32,33 @@ import { launchInitSession, withInitJournal } from "./session.js";
  * the log already holds. Code checks the sorting and writes the log.
  *
  * On a terminal the questions come in screens of at most four, the recommended
- * option first, and the answers become `D-n` entries. A founder who answers
- * later gets AWAIT_INFO, and nothing is written. Off a terminal nobody can be
- * asked, so each recommended answer is taken and logged as a vetoable `X-n`
- * (specification decision 9).
+ * option first, and the answers become `D-n` entries.
+ *
+ * C-3⁶ (PRDR-340): a question is never waited on. One the founder answers
+ * later, and every one off a terminal, where nobody can be asked, is recorded
+ * open as `Q-n` (`questions.ts`), printed, and settles its items while it is
+ * open, and DECIDE completes. No recommended answer is taken for the founder
+ * (amending specification decision 9), and `init` does not stop here
+ * (amending specification decision 5).
  */
 
 type Json = Record<string, unknown>;
 type Ctx = Parameters<PhaseHandler["digest"]>[0];
 
-/** One question as a terminal shows it, the recommended option first. */
-export interface AskedQuestion {
-  readonly number: number;
-  readonly question: string;
-  readonly why_asked: string;
-  readonly options: readonly { readonly answer: string; readonly consequence: string }[];
-  /** False for the question that settles the stack: an answer in the founder's own words carries no stack entry (D-10′). */
-  readonly ownAllowed: boolean;
-}
-
-/** An option by its index, or the founder's own words. */
-export type DecideAnswer = { readonly option: number } | { readonly own: string };
-
-/** C-3⁗: one screen of at most `SCREEN` questions; `later` defers every question. */
-export type DecideAsk = (screen: readonly AskedQuestion[]) => Promise<readonly DecideAnswer[] | "later">;
-
-export const SCREEN = 4;
+export type { AskedQuestion, DecideAnswer, DecideAsk } from "./decide-settle.js";
 
 /** Where the session writes, before anything has checked it, cleared before each launch (D-19). */
 export function decideArtifactPath(root: string): string {
   return path.join(stateDir(root), "state", "decide-artifact.json");
 }
 
-/** Named apart from `DECIDE.json`, the checkpoint, which a case-insensitive file system would take for the same file. */
-const RECORD = "state/decide-record.json";
-
-export function readDecideRecord(root: string): DecideRecord {
-  const empty: DecideRecord = { schema_version: SCHEMA_VERSION, settled: {}, draft: null };
-  const file = path.join(stateDir(root), ...RECORD.split("/"));
-  if (!existsSync(file)) return empty;
-  try {
-    const parsed = parseArtifact(decideRecordSchema, JSON.parse(readFileSync(file, "utf8")));
-    return parsed.ok ? parsed.value : empty;
-  } catch {
-    return empty;
-  }
-}
-
 /** The `expected_output` skeleton; a test parses it through `decideArtifactSchema`, so the two cannot drift. */
 export function decideSkeleton(stackOpen: boolean): Json {
-  const option = (which: string) => ({ answer: `<${which}>`, consequence: "<what choosing it means: the money, the contract, what the product then does>" });
+  const option = (which: string) => ({
+    answer: `<${which}>`,
+    consequence: "<what choosing it means: what the product then does, protects, promises or costs>",
+    basis: "<what that consequence rests on: a primary source, the passages, or your reasoning from them>",
+  });
   const stack = {
     language: "<the bare language name>",
     toolchain: "<the runtime and package manager, with versions>",
@@ -88,15 +69,23 @@ export function decideSkeleton(stackOpen: boolean): Json {
     schema_version: SCHEMA_VERSION,
     questions: [
       {
-        question: "<a decision counted in money or contracts rather than in code>",
-        why_asked: "<why only the founder can answer it>",
+        question: "<a decision that is the founder's by what it affects>",
+        why_asked: "<why it is the founder's>",
         options: [option("the option you recommend"), option("another option")],
         settles: ["<the ids of the items it settles>"],
       },
     ],
     defaults: [
-      { value: "<the decision, stated as a rule the plan follows>", reason: "<why it is defensible: the passages, the source or the practice it follows>", settles: ["<the ids of the items it settles>"] },
-      ...(stackOpen ? [{ value: "<the stack, in one sentence>", reason: "<why this stack>", settles: ["stack"], stack }] : []),
+      {
+        value: "<the decision, stated as a rule the plan follows>",
+        reason: "<why it is defensible: the passages, the source or the practice it follows>",
+        basis: "<what settles it, in one line: a primary source, the passages, or the reasoning from them>",
+        touches: [{ decision: "<a founder decision it touches, as the documents or the log name it>", effect: "applies" }],
+        settles: ["<the ids of the items it settles>"],
+      },
+      ...(stackOpen
+        ? [{ value: "<the stack, in one sentence>", reason: "<why this stack>", basis: "<what settles it>", touches: [], settles: ["stack"], stack }]
+        : []),
     ],
     settled: [{ item: "<an item id>", entry: "<the decision log's id for the entry that already settles it>" }],
   };
@@ -110,7 +99,7 @@ export interface DecideStageDeps {
   readonly stackMarkers: readonly string[];
   readonly promptHash: string;
   readonly launch: (inputs: Json, artifactOut: string) => Promise<void>;
-  /** A terminal's asker; absent off a terminal, where nobody can be asked (specification decision 9). */
+  /** A terminal's asker; absent off a terminal, where nobody can be asked, and every question is recorded open (C-3⁶). */
   readonly ask?: DecideAsk;
   readonly note?: (text: string) => void;
 }
@@ -131,7 +120,21 @@ function readDecide(file: string, items: readonly Item[], log: LogView, strict: 
   return { value: check, issue: null };
 }
 
-async function sort(deps: DecideStageDeps, open: readonly Item[], log: LogView, greenfield: boolean): Promise<DecideCheck> {
+/**
+ * C-3⁶ (PRDR-340): the log as the session's sorting is checked against it, with
+ * each open question in it as an entry, so an item one settles is cited as
+ * settled by its `Q-n`, and a question asked again in other words is refused
+ * as one the log answers is (C-3‴).
+ */
+function withWaiting(log: LogView, waiting: readonly FounderQuestion[]): LogView {
+  return {
+    ...log,
+    ids: new Set([...log.ids, ...waiting.map((q) => q.id)]),
+    decisions: [...log.decisions, ...waiting.map((q) => ({ id: q.id, question: q.question, answer: "", reason: "" }))],
+  };
+}
+
+async function sort(deps: DecideStageDeps, open: readonly Item[], log: LogView, greenfield: boolean, waiting: readonly FounderQuestion[]): Promise<DecideCheck> {
   const artifactOut = decideArtifactPath(deps.root);
   const stackOpen = open.some((i) => i.kind === "stack");
   const sorted = await withOneRelaunch<DecideCheck>({ stage: "DECIDE", note: deps.note }, async (previous) => {
@@ -147,81 +150,17 @@ async function sort(deps: DecideStageDeps, open: readonly Item[], log: LogView, 
           ...log.decisions.map((d) => ({ id: d.id, question: d.question, answer: d.answer })),
           ...log.defaults.map((d) => ({ id: d.id, value: d.value })),
         ],
+        open_questions: waiting.map((q) => ({ id: q.id, question: q.question })),
         items: open.map((i) => i.shown),
         expected_output: decideSkeleton(stackOpen),
         ...refusedAttemptInput(previous, "decision artifact"),
       },
       artifactOut,
     );
-    return readDecide(artifactOut, open, log, previous === null);
+    return readDecide(artifactOut, open, withWaiting(log, waiting), previous === null);
   });
   if (sorted.value === null) throw new Error(`DECIDE produced no usable artifact: ${sorted.issue ?? "unusable"}`);
   return sorted.value;
-}
-
-const asked = (q: DecideQuestion, number: number): AskedQuestion => ({
-  number,
-  question: q.question,
-  why_asked: q.why_asked,
-  options: q.options.map((o) => ({ answer: o.answer, consequence: o.consequence })),
-  ownAllowed: !q.options.some((o) => o.stack !== undefined),
-});
-
-/** Every question, in screens of at most four; `later` on any screen defers them all. */
-async function askAll(ask: DecideAsk, questions: readonly DecideQuestion[]): Promise<DecideAnswer[] | "later"> {
-  const answers: DecideAnswer[] = [];
-  for (let at = 0; at < questions.length; at += SCREEN) {
-    const screen = questions.slice(at, at + SCREEN).map((q, i) => asked(q, at + i + 1));
-    const got = await ask(screen);
-    if (got === "later") return "later";
-    if (got.length !== screen.length) throw new Error(`the asker answered ${String(got.length)} of ${String(screen.length)} questions`);
-    answers.push(...got);
-  }
-  return answers;
-}
-
-/** What the log gains, and which entry settles each item. `answers` is null off a terminal: each recommended option is taken. */
-function settle(sorted: DecideArtifact, answers: readonly DecideAnswer[] | null, log: LogView) {
-  const nextD = nextId(log.ids, "D");
-  const nextX = nextId(log.ids, "X");
-  const add: { decisions: LogAdditions["decisions"][number][]; defaults: LogAdditions["defaults"][number][]; stack: DecidedStack | null } = {
-    decisions: [],
-    defaults: [],
-    stack: null,
-  };
-  const by = new Map(sorted.settled.map((s) => [s.item, s.entry]));
-  const recommended: string[] = [];
-  for (const d of sorted.defaults) {
-    const id = nextX(add.defaults.length);
-    add.defaults.push({ id, value: d.value, reason: d.reason });
-    for (const item of d.settles) by.set(item, id);
-    if (d.stack !== undefined) add.stack = { ...d.stack, decision: id };
-  }
-  sorted.questions.forEach((q, n) => {
-    const answer = answers?.[n];
-    const option = answer === undefined ? q.options[0] : "option" in answer ? q.options[answer.option] : undefined;
-    let id: string;
-    if (answer === undefined) {
-      id = nextX(add.defaults.length);
-      add.defaults.push({
-        id,
-        value: option?.answer ?? "",
-        reason: `The recommended answer to "${q.question}", taken without asking, since off a terminal nobody can be asked (specification decision 9): ${option?.consequence ?? ""}`,
-      });
-      recommended.push(id);
-    } else {
-      id = nextD(add.decisions.length);
-      add.decisions.push({
-        id,
-        question: q.question,
-        answer: option?.answer ?? ("own" in answer ? answer.own : ""),
-        reason: option?.consequence ?? "The founder's own answer, given at DECIDE.",
-      });
-    }
-    for (const item of q.settles) by.set(item, id);
-    if (option?.stack !== undefined) add.stack = { ...option.stack, decision: id };
-  });
-  return { add, by, recommended };
 }
 
 function logDigest(root: string): string {
@@ -242,41 +181,52 @@ export async function decideStage(deps: DecideStageDeps): Promise<PhaseOutcome> 
   const log = readDecisionLog(deps.root);
   const items = openItems(deps.audit, { stackOpen: greenfield && !log.hasStack });
   const record = readDecideRecord(deps.root);
-  /* The stack is open while the log has none, whatever the record says; any other item, while no entry the log holds settles it. */
-  const open = items.filter((i) => i.kind === "stack" || !log.ids.has(record.settled[i.key] ?? ""));
+  const asked = readQuestions(deps.root);
+  const waiting = openQuestions(asked);
+  const isWaiting = (entry: string): boolean => waiting.some((q) => q.id === entry);
+  /*
+   * The stack is open while the log has none, unless an open question settles it; any other item, while no entry the
+   * log holds settles it, and no question still open does (C-3⁶).
+   */
+  const open = items.filter((i) => {
+    const entry = standingEntry(asked, record.settled[i.key] ?? "");
+    return i.kind === "stack" ? !isWaiting(entry) : !log.ids.has(entry) && !isWaiting(entry);
+  });
   if (open.length === 0) {
     deps.note?.(
       items.length === 0
         ? "DECIDE: AUDIT left nothing open, so there is nothing to decide (C-2¹²)"
-        : "DECIDE: every item AUDIT left open is settled by an entry the decision log still holds, so no session ran (C-2¹²)",
+        : "DECIDE: every item AUDIT left open is settled by an entry the decision log still holds, or by a question still open, so no session ran (C-2¹², C-3⁶)",
     );
     noteUnitComplete(deps.root);
-    return outputs(deps.root, { ran: true, session: false, asked: [], defaulted: [], recommended: [], unsorted: [] });
+    return outputs(deps.root, { ran: true, session: false, asked: [], defaulted: [], opened: [], unsorted: [] });
   }
   const key = createHash("sha256")
-    .update(JSON.stringify([open.map((i) => i.key), logDigest(deps.root), deps.promptHash, greenfield, deps.documents]))
+    .update(JSON.stringify([open.map((i) => i.key), logDigest(deps.root), waiting.map((q) => q.id), deps.promptHash, greenfield, deps.documents]))
     .digest("hex");
   const reused = record.draft?.key === key ? record.draft.artifact : null;
-  const sorted = reused === null ? await sort(deps, open, log, greenfield) : checkDecide(reused, open, log);
-  writeArtifact(deps.root, RECORD, { ...record, draft: { key, artifact: sorted.kept } });
+  const sorted = reused === null ? await sort(deps, open, log, greenfield, waiting) : checkDecide(reused, open, withWaiting(log, waiting));
+  writeDecideRecord(deps.root, { ...record, draft: { key, artifact: sorted.kept } });
 
   const questions = sorted.kept.questions;
-  const answers = deps.ask === undefined || questions.length === 0 ? null : await askAll(deps.ask, questions);
-  if (answers === "later") {
-    return { kind: "interrupt", interrupt: "AWAIT_INFO", message: deferredMessage(questions), items: questions.map((q) => q.question) };
-  }
-  const { add, by, recommended } = settle(sorted.kept, answers, log);
+  const answers = deps.ask === undefined || questions.length === 0 ? [] : await askAll(deps.ask, questions);
+  const { add, by } = settle(sorted.kept, answers, log);
   appendToDecisionLog(deps.root, log, add);
+  const later = questions.slice(answers.length);
+  const opened = askQuestions(deps.root, later.map((q) => founderQuestion(q, open)));
+  later.forEach((q, n) => {
+    for (const item of q.settles) by.set(item, opened[n]?.id ?? "");
+  });
   const settled = Object.fromEntries(open.flatMap((i) => (by.has(i.id) ? [[i.key, by.get(i.id) ?? ""]] : [])));
-  writeArtifact(deps.root, RECORD, { schema_version: SCHEMA_VERSION, settled: { ...record.settled, ...settled }, draft: null });
+  writeDecideRecord(deps.root, { schema_version: SCHEMA_VERSION, settled: { ...record.settled, ...settled }, draft: null });
   const run = {
     asked: add.decisions.map((d) => d.id),
-    defaulted: add.defaults.map((d) => d.id).filter((id) => !recommended.includes(id)),
-    recommended,
+    defaulted: add.defaults.map((d) => d.id),
+    opened: opened.map((q) => q.id),
     cited: sorted.kept.settled.map((s) => s.entry),
     unsorted: sorted.unsorted.map((i) => ({ id: i.id, kind: i.kind, summary: i.summary })),
   };
-  for (const text of decideNotes(run, questions, add.defaults)) deps.note?.(text);
+  for (const text of decideNotes(run, opened)) deps.note?.(text);
   /* X-1⁵ (C-2⁶): a completed DECIDE is a unit of work. */
   noteUnitComplete(deps.root);
   return outputs(deps.root, { ran: true, session: reused === null, ...run });

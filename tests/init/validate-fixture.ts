@@ -94,6 +94,14 @@ export function writer(answer: (call: number, inputs: Json, root: string) => Fix
   return { stage, inputs };
 }
 
+/** PRDR-342: an account that applies every finding it was given and declares the default `id` it added (C-3⁶). */
+export const declaring = (inputs: Json, id: string): Json => ({
+  schema_version: SCHEMA_VERSION,
+  applied: ((inputs["findings"] as { id: string }[] | undefined) ?? []).map((f) => f.id),
+  declined: [],
+  defaults: [{ id, basis: "the documents imply it", touches: [] }],
+});
+
 /** A writer that applies every finding with an edit the next round can see: a line added to the Lending PRD. */
 export const appliesAll = (): Writer =>
   writer((call) => ({ edit: { [LENDING_PRD]: (text) => text.replace("## 7. Acceptance criteria", `Fixed in call ${String(call)}.\n\n## 7. Acceptance criteria`) } }));

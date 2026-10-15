@@ -125,18 +125,27 @@ describe("PRDR-282: an interrupt is raised only where INTERRUPT_PHASE lists it (
     );
   });
 
-  it("stops at DECIDE for AWAIT_INFO, checkpoints nothing for it, and adds PRDR-166's note to PRESENT's alone", async () => {
+  it("PRDR-340: refuses AWAIT_INFO from DECIDE, which records a question open instead (C-3⁶)", async () => {
     const root = repo();
     const log: string[] = [];
-    const handlers = (): PhaseHandler[] => [probe("INIT_FS", log), probe("DISCOVER", log), asking("DECIDE")];
+    await expect(runInit(root, [probe("INIT_FS", log), asking("DECIDE")])).rejects.toThrow(
+      "DECIDE raised AWAIT_INFO, which INTERRUPT_PHASE does not let it raise (C-5)",
+    );
+  });
+
+  /* PRDR-340: VALIDATE, since DECIDE raises AWAIT_INFO no longer (C-3⁶). */
+  it("stops at VALIDATE for AWAIT_INFO, checkpoints nothing for it, and adds PRDR-166's note to PRESENT's alone", async () => {
+    const root = repo();
+    const log: string[] = [];
+    const handlers = (): PhaseHandler[] => [probe("INIT_FS", log), probe("DISCOVER", log), asking("VALIDATE")];
     const first = await runInit(root, handlers());
-    expect(first.reachedPhase).toBe("DECIDE");
+    expect(first.reachedPhase).toBe("VALIDATE");
     expect(first.interrupt?.interrupt).toBe("AWAIT_INFO");
-    expect(existsSync(path.join(stateDir(root), "state", "DECIDE.json"))).toBe(false);
+    expect(existsSync(path.join(stateDir(root), "state", "VALIDATE.json"))).toBe(false);
 
     const again = await runInit(root, handlers());
     expect(again.reused).toContain("DISCOVER");
-    expect(again.interrupt?.message, "DECIDE reads the log itself, so DISCOVER's reuse says nothing about an answer").toBe("2 questions");
+    expect(again.interrupt?.message, "the note is PRESENT's alone").toBe("2 questions");
   });
 
   it("still says so at PRESENT when DISCOVER was reused (PRDR-166)", async () => {

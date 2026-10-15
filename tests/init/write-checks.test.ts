@@ -22,7 +22,7 @@ const tree = (files: Readonly<Record<string, string>>): string => {
   return root;
 };
 
-const artifact = (archive: string[], context: string[]): WriteArtifact => ({ schema_version: SCHEMA_VERSION, archive, context });
+const artifact = (archive: string[], context: string[]): WriteArtifact => ({ schema_version: SCHEMA_VERSION, archive, context, questions: [], defaults: [] });
 
 describe("PRDR-283: the artifact accounts for every original (C-2¹³)", () => {
   const given = ["NOTES.md", "PRD.md", "README.md", "docs/adr/ADR-001-money.md", "docs/design/architecture.md", "docs/prd/requirements.md", "docs/roadmap.md"];

@@ -19,7 +19,11 @@ import { movedNote } from "./audit-passages.js";
 import { checkPack } from "./pack-check.js";
 import { packDocuments } from "./pack.js";
 import { refusedAttemptInput, withOneRelaunch, type RetriedAttempt } from "./retry.js";
-import { checkReview, fixIssues, outcomes, type Outcome, type Severity } from "./validate-checks.js";
+import { checkReview, outcomes, type Outcome, type Severity } from "./validate-checks.js";
+import { accountIssues, reviewerQuestions } from "./validate-asks.js";
+import { answerIssues, correctionIssues, markApplied, pendingAnswers, settleQuestions, type Answer } from "./validate-answers.js";
+import { openQuestions, readQuestions } from "./founder-questions.js";
+import { openForWrite, refusedDefaults, removeRows } from "./write-asks.js";
 import { foundationsPrompt } from "./validate-foundations.js";
 import { simulationInput } from "./validate-scratch.js";
 import type { Area } from "./validate-scope.js";
@@ -71,12 +75,38 @@ export function reviewSkeleton(): Json {
   };
 }
 
-/** The writer's `expected_output`, parsed by a test through `fixArtifactSchema`. */
-export function fixSkeleton(): Json {
+/**
+ * The writer's `expected_output`, parsed by a test through `fixArtifactSchema`.
+ * Its `attached` and `corrected` name the first open question, and are empty
+ * while none is open, since a finding attaches only to an open one (C-2²⁹).
+ */
+export function fixSkeleton(open: readonly string[] = []): Json {
+  const option = (which: string): Json => ({
+    answer: `<${which}>`,
+    consequence: "<what choosing it means: what the product then does, protects, promises or costs>",
+    basis: "<what that consequence rests on: a primary source, the passages, or your reasoning from them>",
+  });
   return {
     schema_version: SCHEMA_VERSION,
     applied: ["<the id of each finding you fixed>"],
     declined: [{ id: "<the id of a finding you did not fix>", reason: "<why it is no defect, or why its fix would be wrong>" }],
+    asked: [
+      {
+        findings: ["<the id of each finding whose fix is the founder's, one decision>"],
+        question: "<the decision, in the founder's terms>",
+        why_asked: "<why it is the founder's>",
+        options: [option("the option you recommend"), option("another option")],
+      },
+    ],
+    attached: open.slice(0, 1).map((question) => ({ id: "<the id of a finding this open question's answer settles>", question })),
+    corrected: open.slice(0, 1).map((id) => ({
+      id,
+      findings: ["<the id of each finding that says this question is wrong>"],
+      question: "<the question as it should read>",
+      why_asked: "<why it is the founder's>",
+      options: [option("the option you recommend, as it should read"), option("another option, as it should read")],
+    })),
+    defaults: [{ id: "<the X-n of a default you added to the log>", basis: "<what settles it, in one line>", touches: [] }],
   };
 }
 
@@ -160,6 +190,8 @@ export async function reviewArea(
     ...(handed === undefined ? {} : { foundations_given: true }),
     documents: [...task.documents],
     heuristic: task.heuristic.map((f) => ({ file: f.file, line: f.line, text: f.text, report: f.message })),
+    /* C-2²⁹ (PRDR-342): the founder's questions, read with the foundations. */
+    questions: reviewerQuestions(deps.root),
     ...(verify ? { previous: task.previous, diff: task.diff } : {}),
     /* PRDR-316: what its places are checked against, so it can tell a pack document from context. */
     pack: [...pack],
@@ -200,6 +232,8 @@ export interface BatchFixed {
   readonly changed: readonly string[];
   /** Whether its fixes stand: false when the checker was still red on them, or no requirement stood, and they were undone. */
   readonly stood: boolean;
+  /** PRDR-343: the questions whose answers its fixes applied, which stand. */
+  readonly answered: readonly string[];
 }
 
 interface Attempt {
@@ -228,26 +262,32 @@ export async function fixBatch(deps: RoundDeps, stage: string, findings: readonl
   const logBefore = logState(deps.root);
   const ids = findings.map((f) => f.id);
   const out = fixArtifactPath(deps.root);
+  /* C-3⁶ (PRDR-343): a round's writer applies the founder's answers given since, where the pack cites their questions. */
+  const answers = source === "review" ? pendingAnswers(deps.root) : [];
   const inputs: Json = {
     task: "fix",
     source,
     findings: [...findings],
+    answers: [...answers],
     decision_log: DECISION_LOG_PATH,
     decision_log_entries: [
       ...logBefore.view.decisions.map((d) => ({ id: d.id, question: d.question, answer: d.answer })),
       ...logBefore.view.defaults.map((d) => ({ id: d.id, value: d.value })),
     ],
     next_default: nextId(logBefore.view.ids, "X")(0),
+    open_questions: openForWrite(readQuestions(deps.root)),
     pack_paths: [...PACK_PATHS],
     precedence: [...PACK_PRECEDENCE],
-    expected_output: fixSkeleton(),
+    expected_output: fixSkeleton(openQuestions(readQuestions(deps.root)).map((q) => q.id)),
   };
+  /* C-2²⁹ (PRDR-342): a blocker after a blocker reaches the writer marked, and is asked. */
+  const marked = new Set(findings.filter((f) => f["ask"] === true).map((f) => f.id));
   let result: RetriedAttempt<Attempt>;
   try {
     result = await withOneRelaunch<Attempt>({ stage, note: deps.note }, async (previous) => {
       rmSync(out, { force: true });
       await deps.fix({ ...inputs, ...refusedAttemptInput(previous, "account") }, out);
-      return evaluate(deps, stage, { before, logBefore, ids, strict: previous === null });
+      return evaluate(deps, stage, { before, logBefore, ids, marked, answers, strict: previous === null });
     });
   } catch (err) {
     rollback(deps.root, before);
@@ -258,14 +298,16 @@ export async function fixBatch(deps: RoundDeps, stage: string, findings: readonl
     throw new Error(`${stage}: no usable account of the fixes: ${result.issue ?? "unusable"}; the pack is as it was before the writer ran`);
   }
   const { artifact, green, holds, blocking } = result.value;
+  /* C-2²⁹ (PRDR-342), C-3⁶ (PRDR-343): what it asked or corrected is recorded and printed, and what that settles keeps its outcome, its fixes undone or not. */
+  const settled = settleQuestions(deps.root, stage, artifact, findings, deps.note);
   if (!green || !holds) {
     rollback(deps.root, before);
     const why = holds ? `its fixes left the pack checker red: ${blocking.join("; ")}` : "its fixes left the pack holding no requirement";
     deps.note?.(`${stage}: ${why}, so every fix it made is undone (C-2¹⁴)`);
-    return { outcome: new Map(ids.map((id) => [id, { left: "undone", reason: why }])), changed: [], stood: false };
+    return { outcome: new Map(ids.map((id) => [id, settled.get(id) ?? { left: "undone", reason: why }])), changed: [], stood: false, answered: [] };
   }
   const changed = changedFiles(deps.root, before);
-  return { outcome: outcomes(artifact, ids, changed.length > 0), changed, stood: true };
+  return { outcome: new Map([...outcomes(artifact, ids, changed.length > 0), ...settled]), changed, stood: true, answered: markApplied(deps.root, answers) };
 }
 
 /** The pack's files that no longer hold the bytes `before` holds, sorted. */
@@ -276,7 +318,14 @@ export function changedFiles(root: string, before: Snapshot): string[] {
 function evaluate(
   deps: RoundDeps,
   stage: string,
-  a: { readonly before: Snapshot; readonly logBefore: ReturnType<typeof logState>; readonly ids: readonly string[]; readonly strict: boolean },
+  a: {
+    readonly before: Snapshot;
+    readonly logBefore: ReturnType<typeof logState>;
+    readonly ids: readonly string[];
+    readonly marked: ReadonlySet<string>;
+    readonly answers: readonly Answer[];
+    readonly strict: boolean;
+  },
 ): { value: Attempt | null; issue: string | null } {
   const read = readArtifact(fixArtifactPath(deps.root), fixArtifactSchema);
   if (read.value === null) return { value: null, issue: read.issue };
@@ -285,19 +334,30 @@ function evaluate(
     restoreFile(deps.root, a.before, DECISION_LOG_PATH);
     deps.note?.(`${stage}: the decision log is restored as it was, since the fixes changed what it held: ${damaged.join("; ")}`);
   }
-  const added = damaged.length > 0 ? [] : readDecisionLog(deps.root).defaults.filter((d) => !a.logBefore.view.ids.has(d.id)).map((d) => d.id);
+  const gained = damaged.length > 0 ? [] : readDecisionLog(deps.root).defaults.filter((d) => !a.logBefore.view.ids.has(d.id)).map((d) => d.id);
+  /* C-3⁶ (PRDR-342): a default it did not declare, or one that changes a founder decision, is refused, as WRITE's is (PRDR-341). */
+  const refused = refusedDefaults(read.value, gained);
+  /* A second attempt loses the refused rows before the checker reads the pack, so a fix that still cites one is judged without it. */
+  if (!a.strict) removeRows(deps.root, refused.ids);
+  const added = gained.filter((id) => !refused.ids.includes(id));
   const docs = packDocuments(deps.root);
   const owing = citeIssues(deps.root, docs, added.map((id) => ({ id, why: "a default you added to the log" })));
   const holds = holdsRequirement(deps.root, docs, deps.greenfield);
   const blocking = checkerIssues(checkPack(deps.root, docs, { greenfield: deps.greenfield }));
+  const artifact = read.value;
   const issues = [
-    ...fixIssues(read.value, a.ids),
+    ...accountIssues(read.value, a.ids, a.marked, readQuestions(deps.root)),
+    ...refused.issues,
+    /* PRDR-343: an answer whose question the writer corrects goes back to the founder, and is not applied. */
+    ...answerIssues(deps.root, a.answers.filter((x) => !artifact.corrected.some((c) => c.id === x.id))),
+    ...correctionIssues(deps.root, read.value),
     ...damaged,
     ...(holds ? [] : ["the pack holds no requirement"]),
     ...owing,
     ...blocking,
   ];
   if (a.strict && issues.length > 0) return { value: null, issue: issues.join("; ") };
+  if (refused.ids.length > 0) deps.note?.(`${stage}: the log loses ${refused.ids.join(", ")}, which code refused: ${refused.issues.join("; ")}`);
   for (const issue of owing) deps.note?.(`${stage}: ${issue}`);
   return { value: { artifact: read.value, green: blocking.length === 0, holds, blocking }, issue: null };
 }

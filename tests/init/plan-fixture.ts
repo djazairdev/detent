@@ -83,8 +83,8 @@ export const decideDefaults =
     const artifact = {
       schema_version: SCHEMA_VERSION,
       defaults: [
-        ...(rest.length === 0 ? [] : [{ value: "the documents as written", reason: "the fixture's", settles: rest }]),
-        ...(ids.includes("stack") ? [{ value: "the stack", reason: "the fixture's", settles: ["stack"], stack }] : []),
+        ...(rest.length === 0 ? [] : [{ value: "the documents as written", reason: "the fixture's", basis: "the fixture's", settles: rest }]),
+        ...(ids.includes("stack") ? [{ value: "the stack", reason: "the fixture's", basis: "the fixture's", settles: ["stack"], stack }] : []),
       ],
     };
     writeFileSync(spec.artifactOut, `${JSON.stringify(artifact)}\n`);

@@ -8,8 +8,9 @@ import { DECISION_LOG_PATH } from "../schemas/pack.js";
  * options, the recommended one first, each with what choosing it means.
  *
  * An answer is an option's number, the founder's own words where the question
- * takes them, or `l` to answer later, which defers every question: DECIDE then
- * writes nothing and `init` stops at AWAIT_INFO. An empty line is asked again
+ * takes them, or `l` to answer later. C-3⁶ (PRDR-340): `l` keeps the answers
+ * already given and leaves this question and every one after it open, in
+ * `.detent/questions.md`, and `init` goes on. An empty line is asked again
  * rather than read as the recommendation, since what this records is the
  * founder's decision, and an Enter pressed in passing is not one.
  */
@@ -37,13 +38,14 @@ export function renderScreen(screen: readonly AskedQuestion[]): string {
   const last = screen.at(-1)?.number ?? first;
   return [
     "",
-    `Questions only you can answer (C-3″), ${first === last ? String(first) : `${String(first)}–${String(last)}`}. ` +
-      `Each answer is written to ${DECISION_LOG_PATH} as a decision.`,
+    `Questions only you can answer (C-3⁶), ${first === last ? String(first) : `${String(first)}–${String(last)}`}. ` +
+      `Each answer is written to ${DECISION_LOG_PATH} as a decision; \`l\` leaves a question and every one after it ` +
+      "open in .detent/questions.md, to answer there while `init` goes on.",
     ...screen.flatMap((q) => [
       "",
       `  ${String(q.number)}. ${q.question}`,
       `     why it is yours: ${q.why_asked}`,
-      ...q.options.map((o, i) => `     ${String(i + 1)}) ${o.answer}${i === 0 ? " (recommended)" : ""} — ${o.consequence}`),
+      ...q.options.map((o, i) => `     ${String(i + 1)}) ${o.answer}${i === 0 ? " (recommended)" : ""} — ${o.consequence} (rests on: ${o.basis})`),
     ]),
     "",
   ].join("\n");
@@ -72,7 +74,7 @@ export function makeTtyDecisions(open: () => DecideIo = stdio): DecideAsk {
         const prompt = `\n${String(q.number)}: [${range}]${q.ownAllowed ? ", your own answer" : ""}, or [l]ater `;
         for (;;) {
           const answer = readReply(await io.question(prompt), q);
-          if (answer === "later") return "later";
+          if (answer === "later") return answers;
           if (answer !== null) {
             answers.push(answer);
             break;

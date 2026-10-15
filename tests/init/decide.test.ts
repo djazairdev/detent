@@ -41,7 +41,7 @@ const ids = (inputs: Json | undefined): string[] => ((inputs?.["items"] ?? []) a
 const logText = (root: string): string => readFileSync(decisionLogFile(root), "utf8");
 
 /** A terminal that answers each screen from a script, and records what it was shown. */
-function terminal(script: (screen: readonly AskedQuestion[], n: number) => readonly DecideAnswer[] | "later") {
+function terminal(script: (screen: readonly AskedQuestion[], n: number) => readonly DecideAnswer[]) {
   const screens: (readonly AskedQuestion[])[] = [];
   const ask = async (screen: readonly AskedQuestion[]) => {
     screens.push(screen);
@@ -69,26 +69,20 @@ describe("PRDR-282: DECIDE sorts every item AUDIT left open (C-3⁗)", () => {
     expect(ids(again.inputs[0]), "a confirmed claim is not open").toEqual(["C1", "G1"]);
   });
 
-  it("off a terminal, writes every default and every recommended answer as a vetoable X-n the pack's grammar reads", async () => {
+  it("off a terminal, writes every default as a vetoable X-n the pack's grammar reads, and takes no answer for the founder", async () => {
     const root = repo(EXISTING);
     const notes: string[] = [];
     await initThrough(root, decide((_, i) => SORTED(i)), { notes });
     const log = readDecisionLog(root);
     expect(log.decisions).toEqual([]);
+    /* PRDR-340: the question's recommended answer is no longer taken (C-3⁶); `questions.test.ts` has it open. */
     expect(log.defaults.map((d) => [d.id, d.value])).toEqual([
       ["X-1", LATE.value],
       ["X-2", REFUND.value],
-      ["X-3", "Free in the MVP"],
     ]);
-    expect(log.defaults[0]?.reason).toBe(LATE.reason);
-    expect(log.defaults[2]?.reason).toContain("taken without asking, since off a terminal nobody can be asked (specification decision 9)");
-    expect(log.defaults[2]?.reason).toContain("No revenue until pricing lands.");
+    expect(log.defaults[0]?.reason).toBe(`${LATE.reason} Rests on: ${LATE.basis}.`);
     expect(parsePack(root, [DECISION_LOG_PATH], { greenfield: false }).problems.filter((p) => p.file === DECISION_LOG_PATH)).toEqual([]);
-    /* Decision 9: `init`'s output says so, question by question. */
-    const said = notes.join("\n");
-    expect(said).toContain("DECIDE took the recommended answer to 1 question without asking");
-    expect(said).toContain(`X-3: ${PRICE.question} → Free in the MVP`);
-    expect(said).toContain("A default is vetoable");
+    expect(notes.join("\n")).toContain("A default is vetoable");
   });
 
   it("relaunches once with what it refused, and the second attempt keeps what stands", async () => {
@@ -105,7 +99,7 @@ describe("PRDR-282: DECIDE sorts every item AUDIT left open (C-3⁗)", () => {
     expect(refused).toContain("default 1 names Z9, which is not an item in your inputs");
     expect(refused).toContain("1 item(s) settled by nothing: K1");
     /* The second attempt still leaves K1 unsorted: kept as it is, and said. */
-    expect(readDecisionLog(root).defaults.map((d) => d.value)).toEqual([LATE.value, "Free in the MVP"]);
+    expect(readDecisionLog(root).defaults.map((d) => d.value)).toEqual([LATE.value]);
     expect(notes.join("\n")).toContain("DECIDE left 1 item unsorted after its relaunch");
     expect(decideOutputs(root)["unsorted"]).toEqual([expect.objectContaining({ id: "K1", kind: "claim" })]);
   });
@@ -126,7 +120,7 @@ describe("PRDR-282: on a terminal, the questions are asked in screens of four (C
     const tty = terminal((screen) => screen.map((q) => (q.number === 2 ? { own: "Tax is on the member." } : { option: q.number === 1 ? 1 : 0 })));
     await initThrough(root, decide(() => artifact({ questions })), { ask: tty.ask });
     expect(tty.screens.map((s) => s.map((q) => q.number))).toEqual([[1, 2, 3]]);
-    expect(tty.screens[0]?.[0]?.options).toEqual(PRICE.options.map((o) => ({ answer: o.answer, consequence: o.consequence })));
+    expect(tty.screens[0]?.[0]?.options).toEqual(PRICE.options.map((o) => ({ answer: o.answer, consequence: o.consequence, basis: o.basis })));
     expect(tty.screens[0]?.[0]?.why_asked).toBe(PRICE.why_asked);
     const log = readDecisionLog(root);
     expect(log.defaults).toEqual([]);
@@ -150,17 +144,15 @@ describe("PRDR-282: on a terminal, the questions are asked in screens of four (C
   });
 });
 
-describe("PRDR-282: answering later stops at DECIDE with AWAIT_INFO (C-3⁗, C-5)", () => {
-  it("lists every question with its options, writes nothing, and asks again next time without a session", async () => {
+describe("PRDR-282: a terminal that fails mid-screen asks again next time, without a session", () => {
+  /* PRDR-340: answering later completes DECIDE (C-3⁶), so the draft is reused only when DECIDE did not complete. */
+  it("keeps the checked draft, writes nothing, and asks it again on the next init", async () => {
     const root = repo(EXISTING);
     const stub = decide((_, i) => SORTED(i));
-    const later = await initThrough(root, stub, { ask: async () => "later" });
-    expect(later.reachedPhase).toBe("DECIDE");
-    expect(later.interrupt?.interrupt).toBe("AWAIT_INFO");
-    expect(later.interrupt?.message).toContain(PRICE.question);
-    expect(later.interrupt?.message).toContain("1) Free in the MVP (recommended) — No revenue until pricing lands.");
-    expect(later.interrupt?.message).toContain("Nothing was written to the decision log.");
-    expect(later.interrupt?.items).toEqual([PRICE.question]);
+    const closed = async (): Promise<readonly DecideAnswer[]> => {
+      throw new Error("the terminal closed");
+    };
+    await expect(initThrough(root, stub, { ask: closed })).rejects.toThrow("the terminal closed");
     expect(existsSync(decisionLogFile(root))).toBe(false);
     expect(existsSync(path.join(stateDir(root), "state", "DECIDE.json"))).toBe(false);
 
@@ -172,10 +164,10 @@ describe("PRDR-282: answering later stops at DECIDE with AWAIT_INFO (C-3⁗, C-5
     expect(decideOutputs(root)["session"]).toBe(false);
   });
 
-  it("drafts again when the log changed while the questions waited", async () => {
+  it("drafts again when the log changed in between", async () => {
     const root = repo(EXISTING);
     const stub = decide((_, i) => SORTED(i));
-    await initThrough(root, stub, { ask: async () => "later" });
+    await expect(initThrough(root, stub, { ask: async () => Promise.reject(new Error("the terminal closed")) })).rejects.toThrow();
     writeTree(root, { [DECISION_LOG_PATH]: "# Founder decisions\n\n## Defaults\n\n| Id | Default | Reason |\n|---|---|---|\n| X-1 | Late returns are free. | Goodwill. |\n" });
     await initThrough(root, stub, { ask: async (screen) => screen.map(() => ({ option: 0 })) });
     expect(stub.inputs).toHaveLength(2);
@@ -235,8 +227,7 @@ describe("PRDR-282: an answer re-runs DECIDE forward, never AUDIT (C-8, C-2¹²)
     expect(ids(stub.inputs[1])).toEqual(["G1"]);
     expect(readDecisionLog(root).defaults.map((d) => [d.id, d.value])).toEqual([
       ["X-2", REFUND.value],
-      ["X-3", "Free in the MVP"],
-      ["X-4", "Late returns are refused."],
+      ["X-3", "Late returns are refused."],
     ]);
   });
 
@@ -269,8 +260,8 @@ describe("PRDR-282: in greenfield DECIDE records the stack (D-10′)", () => {
       question: "Which hosting contract does the product run on?",
       why_asked: "Each is a contract with its own monthly cost.",
       options: [
-        { answer: "A managed Node host", consequence: "A monthly fee.", stack: { language: "TypeScript", toolchain: "Node.js 24" } },
-        { answer: "The founder's Go server", consequence: "No new contract.", stack: { language: "Go", toolchain: "Go 1.24", gates: { test: "go test ./..." } } },
+        { answer: "A managed Node host", consequence: "A monthly fee.", basis: "the host's price list", stack: { language: "TypeScript", toolchain: "Node.js 24" } },
+        { answer: "The founder's Go server", consequence: "No new contract.", basis: "the server the founder already runs", stack: { language: "Go", toolchain: "Go 1.24", gates: { test: "go test ./..." } } },
       ],
       settles: ["stack"],
     };
