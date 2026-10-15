@@ -115,7 +115,7 @@ codes and the plumbing commands are in [docs/reference.md](docs/reference.md).
 ## Make your first contribution
 
 1. Pick an issue labelled [good first issue](https://github.com/djazairdev/detent/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
-2. Comment on it to say you're working on it.
+2. Comment `/take` on it: it's assigned to you, and you can start.
 3. Follow [CONTRIBUTING.md](CONTRIBUTING.md) to set up, test and open a pull request, and the rules in [AGENTS.md](AGENTS.md).
 4. We reply to newcomers' pull requests within 7 days. A review or a merge may take longer.
 

@@ -1,13 +1,14 @@
 # Contributing
 
-<!-- djazairdev-template: 1.6.0 -->
+<!-- djazairdev-template: 1.7.0 -->
 
 Thanks for helping. Newcomers are welcome: you don't need to be an expert, and no question is too small.
 
 ## Find something to work on
 
 - Issues labelled [good first issue](https://github.com/djazairdev/detent/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) are small and well described. [help wanted](https://github.com/djazairdev/detent/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22) issues need more context but are ready for anyone.
-- Comment on the issue to say you're working on it, so no one else starts the same thing. If you stop, say so.
+- **Comment `/take` on the issue** to have it assigned to you, and start straight away: you don't need to wait for a maintainer. If someone already has it, the bot says who, so pick another one. The first `/take` wins.
+- If you stop, comment `/drop` so someone else can take it. A maintainer may free an issue that has had no pull request or update for 7 days.
 - Found a bug, or have an idea? [Open an issue](https://github.com/djazairdev/detent/issues/new/choose). That's all it takes: there's no separate form or record to file, and no approval step before you start on an issue labelled for help.
 - For anything bigger than a small fix, say in the issue how you'd do it, so we agree on the approach before you spend time on it.
 
@@ -89,7 +90,7 @@ CI runs the checks on every pull request. Pull requests are squash-merged, so th
 ## Review
 
 - A maintainer reviews every pull request; we may ask for changes, which is normal.
-- **CI on a pull request from a fork waits until a maintainer approves the run.** That's a safety setting, not a judgement on your change.
+- **On your first pull request, CI waits until a maintainer approves the run.** That's GitHub's safety setting for first-time contributors, not a judgement on your change. Once a pull request of yours is merged, CI runs on its own.
 - Answer review comments with new commits rather than a force-push, so the conversation stays readable. The squash merge tidies the history.
 - A maintainer merges once CI passes and every conversation is resolved.
 - Nothing is closed automatically. If a pull request goes quiet for a long time, we ask before we close it.
