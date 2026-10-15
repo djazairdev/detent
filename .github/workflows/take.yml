@@ -1,0 +1,72 @@
+# Lets anyone take an issue without waiting for a maintainer: a comment whose first word is /take
+# assigns the issue to its author, unless someone already has it, and /drop gives it back
+# (CONTRIBUTING.md, "Find something to work on"). Works on every issue, not on pull requests.
+# It checks out no code, and the comment is only compared, never run.
+name: Take an issue
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+
+# Two people commenting /take at once: the second run waits and sees the first one's claim.
+concurrency:
+  group: take-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  take:
+    name: Take or drop
+    if: >-
+      !github.event.issue.pull_request && github.event.comment.user.type != 'Bot' &&
+      (startsWith(github.event.comment.body, '/take') || startsWith(github.event.comment.body, '/drop'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Assign or unassign the commenter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.issue.number }}
+          STATE: ${{ github.event.issue.state }}
+          LOGIN: ${{ github.event.comment.user.login }}
+          BODY: ${{ github.event.comment.body }}
+          GUIDE: ${{ github.server_url }}/${{ github.repository }}/blob/${{ github.event.repository.default_branch }}/CONTRIBUTING.md
+        run: |
+          command=$(printf '%s\n' "$BODY" | head -n 1 | tr -d '\r' | awk '{print $1}')
+          case "$command" in
+            /take | /drop) ;;
+            *) echo "Not a command: $command"; exit 0 ;;
+          esac
+          say() { gh api "repos/$GH_REPO/issues/$NUMBER/comments" -f body="$1" --silent; }
+          # Read the assignees now, not from the event, which may be older than another run's claim.
+          assignees=$(gh api "repos/$GH_REPO/issues/$NUMBER" --jq '[.assignees[].login] | join(" ")')
+          has() { [[ " $assignees " == *" $1 "* ]]; }
+
+          if [ "$command" = /drop ]; then
+            if has "$LOGIN"; then
+              gh api -X DELETE "repos/$GH_REPO/issues/$NUMBER/assignees" -f "assignees[]=$LOGIN" --silent
+              say "Thanks, @$LOGIN. The issue is free again: anyone can comment \`/take\` to work on it."
+            fi
+            exit 0
+          fi
+
+          if [ "$STATE" != open ]; then
+            say "@$LOGIN, this issue is closed, so it can't be taken. Pick an open one."
+          elif has "$LOGIN"; then
+            echo "@$LOGIN already has #$NUMBER"
+          elif [ -n "$assignees" ]; then
+            read -ra holders <<< "$assignees"
+            others=$(printf '@%s ' "${holders[@]}")
+            say "@$LOGIN, this issue is already taken by ${others% }. Pick another one, or ask here whether they're still on it."
+          else
+            now=$(gh api -X POST "repos/$GH_REPO/issues/$NUMBER/assignees" -f "assignees[]=$LOGIN" --jq '[.assignees[].login] | join(" ")')
+            if [[ " $now " == *" $LOGIN "* ]]; then
+              say "@$LOGIN, it's yours: you can start now. [CONTRIBUTING]($GUIDE) has the setup, the tests and how to open a pull request. If you stop, comment \`/drop\` so someone else can take it."
+            else
+              say "@$LOGIN, GitHub didn't let the bot assign you. A maintainer will do it: you can start now."
+              exit 1
+            fi
+          fi
