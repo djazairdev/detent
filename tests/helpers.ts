@@ -37,8 +37,15 @@ export function writeTree(root: string, files: Readonly<Record<string, string>>)
   }
 }
 
+/**
+ * #35: a process a test started (a git command, a session) can still be
+ * writing into the tree when the test ends, and a single `rm` then fails with
+ * ENOTEMPTY. Node retries that code with a linear backoff (retryDelay times
+ * the attempt number), so 10 retries wait about 550 ms in total and the writer
+ * finishes before the removal gives up.
+ */
 export function removeTree(root: string): void {
-  rmSync(root, { recursive: true, force: true });
+  rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 10 });
 }
 
 /** A git repo with identity configured, so tests commit without a global config. */
